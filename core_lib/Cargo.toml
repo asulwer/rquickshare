@@ -26,6 +26,7 @@ get_if_addrs = "0.5"
 hex = "0.4"
 hkdf = "0.12"
 hmac = "0.12"
+hostname = "0.4"
 libaes = "0.7"
 log = "0.4"
 mdns-sd = { git = "https://github.com/Martichou/mdns-sd", branch = "unsolicited" }
@@ -37,7 +38,6 @@ prost = "0.13"
 rand = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10"
-sys_metrics = { git = "https://github.com/Martichou/sys_metrics" }
 tokio = { version = "1.43", features = ["macros", "rt", "rt-multi-thread", "net", "sync", "time", "io-util", "signal"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

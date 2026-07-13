@@ -136,7 +136,7 @@ impl MDnsServer {
         device_type: DeviceType,
     ) -> Result<ServiceInfo, anyhow::Error> {
         let name = gen_mdns_name(endpoint_id);
-        let hostname = sys_metrics::host::get_hostname()?;
+        let hostname = ::hostname::get()?.to_string_lossy().into_owned();
         info!("Broadcasting with: {hostname}");
         let endpoint_info = gen_mdns_endpoint_info(device_type as u8, &hostname);
 

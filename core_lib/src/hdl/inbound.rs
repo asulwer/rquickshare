@@ -1,6 +1,38 @@
 use std::fs::File;
-use std::os::unix::fs::FileExt;
 use std::time::Duration;
+
+/// Write the entire buffer to `file` at the given byte `offset`, independent
+/// of the file cursor. Cross-platform replacement for the Unix-only
+/// `std::os::unix::fs::FileExt::write_all_at`.
+#[cfg(unix)]
+fn write_all_at(file: &File, buf: &[u8], offset: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.write_all_at(buf, offset)
+}
+
+#[cfg(windows)]
+fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    // `seek_write` is not guaranteed to write the whole buffer in one call,
+    // so loop until everything is written (mirrors `write_all_at` semantics).
+    while !buf.is_empty() {
+        match file.seek_write(buf, offset) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "failed to write whole buffer",
+                ));
+            }
+            Ok(n) => {
+                buf = &buf[n..];
+                offset += n as u64;
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
 
 use anyhow::anyhow;
 use bytes::Bytes;
@@ -652,11 +684,11 @@ impl InboundRequest {
                         }
 
                         if !chunk.body().is_empty() {
-                            file_internal
-                                .file
-                                .as_ref()
-                                .unwrap()
-                                .write_all_at(chunk.body(), current_offset as u64)?;
+                            write_all_at(
+                                file_internal.file.as_ref().unwrap(),
+                                chunk.body(),
+                                current_offset as u64,
+                            )?;
                             file_internal.bytes_transferred += chunk_size as i64;
 
                             self.update_state(

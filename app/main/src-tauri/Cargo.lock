@@ -2057,6 +2057,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hostname"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-link",
+]
+
+[[package]]
 name = "html5ever"
 version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2403,16 +2414,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "io-kit-sys"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b2d4429acc1deff0fbdece0325b4997bdb02b2c245ab7023fd5deca0f6348de"
-dependencies = [
- "core-foundation-sys",
- "mach2",
-]
-
-[[package]]
 name = "ipnet"
 version = "2.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2728,24 +2729,6 @@ name = "macaddr"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baee0bbc17ce759db233beb01648088061bf678383130602a298e6998eedb2d8"
-
-[[package]]
-name = "mach"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b823e83b2affd8f40a9ee8c29dbc56404c1e34cd2710921f2801e2cf29527afa"
-dependencies = [
- "libc",
-]
-
-[[package]]
-name = "mach2"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19b955cdeb2a02b9117f121ce63aa52d08ade45de53e48fe6a38b39c10f6f709"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "malloc_buf"
@@ -4235,6 +4218,7 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac",
+ "hostname",
  "libaes",
  "log",
  "mdns-sd",
@@ -4247,7 +4231,6 @@ dependencies = [
  "rand 0.9.0",
  "serde",
  "sha2",
- "sys_metrics 0.2.7 (git+https://github.com/Martichou/sys_metrics)",
  "tokio",
  "tokio-util",
  "tracing-subscriber",
@@ -4261,13 +4244,13 @@ version = "0.11.5"
 dependencies = [
  "anyhow",
  "fern",
+ "hostname",
  "humantime",
  "log",
  "notify-rust",
  "rqs_lib",
  "serde",
  "serde_json",
- "sys_metrics 0.2.7 (registry+https://github.com/rust-lang/crates.io-index)",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",
@@ -4933,35 +4916,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sys_metrics"
-version = "0.2.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9b266b80f59f86e2e1e0a4938e316e32c3730d94a749f236305152279f77484"
-dependencies = [
- "core-foundation-sys",
- "glob",
- "io-kit-sys",
- "lazy_static",
- "libc",
- "mach",
- "serde",
-]
-
-[[package]]
-name = "sys_metrics"
-version = "0.2.7"
-source = "git+https://github.com/Martichou/sys_metrics#e5b324a17d1724bd97923a173c3535cc06a44b0c"
-dependencies = [
- "core-foundation-sys",
- "glob",
- "io-kit-sys",
- "lazy_static",
- "libc",
- "mach",
- "serde",
-]
-
-[[package]]
 name = "system-deps"
 version = "6.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5282,9 +5236,9 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-single-instance"
-version = "2.2.0"
+version = "2.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f36019ee9832dc99e4450bb55a21cfad8633b19c2c18bd17c7741939b070ede"
+checksum = "97d0e07b40fb2eb13778e30778f5979347a2bf30e1b9d47f78ff7fe92d2e4b3d"
 dependencies = [
  "serde",
  "serde_json",
@@ -5292,7 +5246,7 @@ dependencies = [
  "thiserror 2.0.9",
  "tracing",
  "windows-sys 0.59.0",
- "zbus 4.4.0",
+ "zbus 5.2.0",
 ]
 
 [[package]]
@@ -6480,6 +6434,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows-link"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
 name = "windows-registry"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7029,8 +6989,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fb67eadba43784b6fb14857eba0d8fc518686d3ee537066eb6086dc318e2c8a1"
 dependencies = [
  "async-broadcast",
+ "async-executor",
+ "async-fs",
+ "async-io",
+ "async-lock",
+ "async-process",
  "async-recursion",
+ "async-task",
  "async-trait",
+ "blocking",
  "enumflags2",
  "event-listener",
  "futures-core",
