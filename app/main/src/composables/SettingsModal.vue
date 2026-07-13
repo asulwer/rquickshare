@@ -58,6 +58,12 @@ function openDownloadPicker() {
 					</label>
 				</div>
 				<div class="form-control hover:bg-gray-500 hover:bg-opacity-10 rounded-xl p-3">
+					<label class="cursor-pointer flex flex-row justify-between items-center" @click="utils.setClipboardAutosync(vm, !vm.clipboardAutosync)">
+						<span class="label-text">Auto-stage clipboard text</span>
+						<input type="checkbox" :checked="vm.clipboardAutosync" class="checkbox focus:outline-none">
+					</label>
+				</div>
+				<div class="form-control hover:bg-gray-500 hover:bg-opacity-10 rounded-xl p-3">
 					<label class="cursor-pointer flex flex-col items-start" @click="openDownloadPicker()">
 						<span class="">Change download folder</span>
 						<span class="overflow-hidden whitespace-nowrap text-ellipsis text-xs max-w-80">

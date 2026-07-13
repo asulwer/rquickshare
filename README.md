@@ -115,11 +115,15 @@ FAQ
 
 Make sure both your devices are on the same WiFi network. mDNS communication should be allowed on the network; this may not be the case if you're on a public network (coffee shops, airports, etc.).
 
+### How do I send text or a link?
+
+Copy the text (or URL) to your clipboard, then press `Ctrl+V` (or `Cmd+V`) inside the RQuickShare window and pick the target device. URLs are sent so the receiving Android device can open them in a browser. You can also enable **Auto-stage clipboard text** in Settings to have newly copied text staged for sending automatically.
+
 ### My laptop doesn't see my Android device
 
 For some reason, Android doesn't broadcast its mDNS service all the time, even when in "Everyone" mode.
 
-The first solution (implemented in RQuickShare for Linux) is to broadcast a bluetooth advertisement so that Android will then make its mDNS available.
+The first solution (implemented in RQuickShare for Linux and Windows) is to broadcast a bluetooth advertisement so that Android will then make its mDNS available.
 Of course, for this you need to have bluetooth on your laptop/desktop. If you don't have that, continue reading.
 
 As a workaround, you can use the "[Files](https://play.google.com/store/apps/details?id=com.google.android.apps.nbu.files)" app on your Android device and go to the "Nearby Share" tab (if it's not present, continue reading).
@@ -196,7 +200,7 @@ Alternatively, you may try the `legacy` variant.
 WIP Notes
 --------------------------
 
-`rquickshare` is still in development (WIP) and currently only supports Linux even though it should be compatible with macOS too. Keep in mind that the design may change between versions, so flexibility is key.
+`rquickshare` is still in development (WIP). Linux and Windows are supported; macOS should also work but is less tested. Keep in mind that the design may change between versions, so flexibility is key.
 
 Got feedback or suggestions? We'd love to hear them! Feel free to open an issue and share your thoughts.
 

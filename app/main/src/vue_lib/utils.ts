@@ -1,6 +1,6 @@
 import { Visibility } from '@martichou/core_lib/bindings/Visibility';
 import { TauriVM } from './helper/ParamsHelper';
-import { autostartKey, DisplayedItem, downloadPathKey, numberToVisibility, realcloseKey, startminimizedKey, stateToDisplay, visibilityKey, visibilityToNumber } from './types';
+import { autostartKey, clipboardAutosyncKey, DisplayedItem, downloadPathKey, numberToVisibility, realcloseKey, startminimizedKey, stateToDisplay, visibilityKey, visibilityToNumber } from './types';
 import { SendInfo } from '@martichou/core_lib/bindings/SendInfo';
 import { ChannelMessage } from '@martichou/core_lib/bindings/ChannelMessage';
 import { ChannelAction } from '@martichou/core_lib';
@@ -90,6 +90,16 @@ async function setStartMinimized(vm: TauriVM, startminimized: boolean) {
 
 async function getStartMinimized(vm: TauriVM) {
 	vm.startminimized = await vm.store.get(startminimizedKey) ?? false;
+}
+
+async function setClipboardAutosync(vm: TauriVM, clipboardAutosync: boolean) {
+	await vm.store.set(clipboardAutosyncKey, clipboardAutosync);
+	await vm.store.save();
+	vm.clipboardAutosync = clipboardAutosync;
+}
+
+async function getClipboardAutosync(vm: TauriVM) {
+	vm.clipboardAutosync = await vm.store.get(clipboardAutosyncKey) ?? false;
 }
 
 async function setVisibility(vm: TauriVM, visibility: Visibility) {
@@ -218,6 +228,8 @@ export const utils = {
 	getDownloadPath,
 	getLatestVersion,
 	setStartMinimized,
-	getStartMinimized
+	getStartMinimized,
+	setClipboardAutosync,
+	getClipboardAutosync
 };
 export type UtilsType = typeof utils;

@@ -83,6 +83,8 @@ pub struct InnerState {
 
     // Used to handle/track ingress transfer
     pub text_payload: Option<TextPayloadInfo>,
+    // Used to handle egress text transfer: (payload_id, text bytes)
+    pub outbound_text: Option<(i64, Vec<u8>)>,
     // pub text_payload_id: i64,
     // pub text_is_url: bool,
     // pub wifi_ssid: Option<String>,

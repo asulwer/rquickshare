@@ -154,7 +154,7 @@ import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notif
 import { disable, enable } from '@tauri-apps/plugin-autostart';
 import { open as tauriDialog } from '@tauri-apps/plugin-dialog';
 import { open } from '@tauri-apps/plugin-shell';
-import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+import { writeText, readText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { ChannelMessage } from '@martichou/core_lib/bindings/ChannelMessage';
 import { EndpointInfo } from '@martichou/core_lib/bindings/EndpointInfo';
@@ -220,6 +220,8 @@ export default {
 			autostart: ref<boolean>(true),
 			realclose: ref<boolean>(false),
 			startminimized: ref<boolean>(false),
+			clipboardAutosync: ref<boolean>(false),
+			lastClipboard: ref<string | undefined>(undefined),
 			visibility: ref<Visibility>('Visible'),
 			downloadPath: ref<string | undefined>(),
 
@@ -246,6 +248,7 @@ export default {
 
 			await this.getRealclose(this);
 			await this.getStartMinimized(this);
+			await this.getClipboardAutosync(this);
 			await this.getDownloadPath(this);
 
 			// Check permission for notification
@@ -331,6 +334,56 @@ export default {
 					}
 				})
 			);
+
+			// Ctrl/Cmd+V pastes clipboard text and stages it to send.
+			const onPaste = async (e: KeyboardEvent) => {
+				if (!(e.ctrlKey || e.metaKey) || (e.key !== 'v' && e.key !== 'V')) return;
+
+				// Ignore paste while typing in an input field.
+				const target = e.target as HTMLElement | null;
+				if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+					return;
+				}
+
+				let text: string | null = null;
+				try {
+					text = await readText();
+				} catch {
+					return;
+				}
+				if (!text || text.trim().length === 0) return;
+
+				this.lastClipboard = text;
+				this.outboundPayload = { Text: text } as OutboundPayload;
+				if (!this.discoveryRunning) await invoke('start_discovery');
+				this.discoveryRunning = true;
+				this.toastStore.addToast("Text ready to send - pick a device", ToastType.Success);
+			};
+			window.addEventListener('keydown', onPaste);
+			this.unlisten.push(() => window.removeEventListener('keydown', onPaste));
+
+			// Optional clipboard auto-sync: when enabled, auto-stage new
+			// clipboard text while idle so you only have to pick a device.
+			const clipboardTimer = window.setInterval(async () => {
+				if (!this.clipboardAutosync) return;
+				if (this.outboundPayload !== undefined) return;
+
+				let text: string | null = null;
+				try {
+					text = await readText();
+				} catch {
+					return;
+				}
+				if (!text || text.trim().length === 0) return;
+				if (text === this.lastClipboard) return;
+
+				this.lastClipboard = text;
+				this.outboundPayload = { Text: text } as OutboundPayload;
+				if (!this.discoveryRunning) await invoke('start_discovery');
+				this.discoveryRunning = true;
+				this.toastStore.addToast("Clipboard text staged to send - pick a device", ToastType.Success);
+			}, 1500);
+			this.unlisten.push(() => window.clearInterval(clipboardTimer));
 
 			await this.getLatestVersion(this);
 		});

@@ -53,7 +53,8 @@ const pluralize = (n: number, s: string) => n === 1 ? s : `${s}s`;
 	<div class="w-72 p-6 flex flex-col justify-between" v-else>
 		<div>
 			<p class="mt-4 mb-2">
-				Sharing {{ props.vm.outboundPayload.Files.length }} {{ pluralize(props.vm.outboundPayload.Files.length, "file") }}
+				<span v-if="'Text' in props.vm.outboundPayload">Sharing text</span>
+				<span v-else>Sharing {{ (props.vm.outboundPayload as any).Files.length }} {{ pluralize((props.vm.outboundPayload as any).Files.length, "file") }}</span>
 			</p>
 			<div class="bg-white w-32 h-32 rounded-2xl mb-2 flex justify-center items-center">
 				<svg
@@ -63,9 +64,16 @@ const pluralize = (n: number, s: string) => n === 1 ? s : `${s}s`;
                     <path d="M240-80q-33 0-56.5-23.5T160-160v-640q0-33 23.5-56.5T240-880h320l240 240v480q0 33-23.5 56.5T720-80H240Zm280-520v-200H240v640h480v-440H520ZM240-800v200-200 640-640Z" />
 				</svg>
 			</div>
-			<p v-for="f in props.vm.outboundPayload.Files" :key="f" class="overflow-hidden whitespace-nowrap text-ellipsis">
-				{{ f.split('/').pop() }}
-			</p>
+			<template v-if="'Text' in props.vm.outboundPayload">
+				<p class="overflow-hidden text-ellipsis line-clamp-3">
+					{{ (props.vm.outboundPayload as any).Text }}
+				</p>
+			</template>
+			<template v-else>
+				<p v-for="f in (props.vm.outboundPayload as any).Files" :key="f" class="overflow-hidden whitespace-nowrap text-ellipsis">
+					{{ f.split('/').pop() }}
+				</p>
+			</template>
 
 			<p class="text-xs mt-3">
 				Make sure both devices are unlocked, close together, and have bluetooth turned on. Device you're sharing with need
