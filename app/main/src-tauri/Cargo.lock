@@ -4236,6 +4236,7 @@ dependencies = [
  "tracing-subscriber",
  "ts-rs",
  "uuid",
+ "windows 0.58.0",
 ]
 
 [[package]]

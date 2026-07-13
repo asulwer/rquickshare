@@ -15,6 +15,15 @@ bluer = { version = "0.17", features = ["full"], optional = true }
 [target.'cfg(all(target_arch = "aarch64", target_os = "linux"))'.dependencies]
 dbus = { version = "0.9", features = ["vendored"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Devices_Bluetooth_Advertisement",
+    "Storage_Streams",
+    "Foundation",
+    "Foundation_Collections",
+    "Win32_System_Com",
+], optional = true }
+
 [dependencies]
 anyhow = "1.0"
 base64 = "0.22"
@@ -49,7 +58,7 @@ prost-build = "0.13"
 
 [features]
 default = ["experimental"]
-experimental = ["bluer", "btleplug"]
+experimental = ["bluer", "btleplug", "windows"]
 
 [profile.release]
 lto = true
