@@ -133,6 +133,12 @@ impl MDnsDiscovery {
             }
         }
 
+        // Cleanly stop browsing and shut the daemon down so its background
+        // thread doesn't keep trying to deliver events to the now-dropped
+        // receiver, which floods the log with "sending on a closed channel".
+        let _ = self.daemon.stop_browse(service_type);
+        let _ = self.daemon.shutdown();
+
         Ok(())
     }
 }

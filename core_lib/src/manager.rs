@@ -88,7 +88,11 @@ impl TcpServer {
                                                         ..Default::default()
                                                     });
                                                 }
-                                                error!("{INNER_NAME}: error while handling client: {e} ({:?})", ir.state.state);
+                                                if ir.state.state == State::Finished {
+                                                    debug!("{INNER_NAME}: client disconnected after transfer: {e}");
+                                                } else {
+                                                    error!("{INNER_NAME}: error while handling client: {e} ({:?})", ir.state.state);
+                                                }
                                                 break;
                                             }
                                         },
@@ -153,7 +157,11 @@ impl TcpServer {
                                         ..Default::default()
                                     });
                                 }
-                                error!("{INNER_NAME}: error while handling client: {e} ({:?})", or.state.state);
+                                if or.state.state == State::Finished || or.state.state == State::Cancelled {
+                                    debug!("{INNER_NAME}: client disconnected after {:?}: {e}", or.state.state);
+                                } else {
+                                    error!("{INNER_NAME}: error while handling client: {e} ({:?})", or.state.state);
+                                }
                                 break;
                             }
                         }

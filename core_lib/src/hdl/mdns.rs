@@ -127,6 +127,11 @@ impl MDnsServer {
             info!("MDnsServer: service unregistered: {:?}", &event);
         }
 
+        // Shut the daemon down so its background thread stops cleanly instead
+        // of being orphaned, which otherwise floods the log with
+        // "sending on a closed channel" errors.
+        let _ = self.daemon.shutdown();
+
         Ok(())
     }
 

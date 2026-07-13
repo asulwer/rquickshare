@@ -528,6 +528,12 @@ impl OutboundRequest {
                 trace!("Sending keepalive");
                 self.send_keepalive(true).await?;
             }
+            location_nearby_connections::v1_frame::FrameType::Disconnection => {
+                // The remote device closed the session (normal after a transfer
+                // completes). End cleanly rather than logging it as an error.
+                info!("Received disconnect frame, ending session");
+                return Err(anyhow!(crate::errors::AppError::NotAnError));
+            }
             _ => {
                 error!("Unhandled offline frame encrypted: {:?}", offline);
             }
