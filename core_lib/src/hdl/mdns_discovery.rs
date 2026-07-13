@@ -118,7 +118,16 @@ impl MDnsDiscovery {
                                 _ => {}
                             }
                         },
-                        Err(err) => error!("MDnsDiscovery: error: {}", err),
+                        Err(err) => {
+                            // The mDNS browse channel is closed/disconnected
+                            // (e.g. the daemon shut down after a sleep or
+                            // network change). This error is terminal and
+                            // non-recoverable, so continuing to loop would
+                            // busy-spin and flood the log/disk (see #268).
+                            // Stop the discovery task instead.
+                            error!("MDnsDiscovery: browse channel closed, stopping discovery: {}", err);
+                            break;
+                        }
                     }
                 }
             }
