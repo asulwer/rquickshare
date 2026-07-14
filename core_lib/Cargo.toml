@@ -1,6 +1,6 @@
 [package]
 name = "rqs_lib"
-version = "0.11.5"
+version.workspace = true
 edition = "2021"
 authors = ["martichou"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -59,8 +59,3 @@ prost-build = "0.13"
 [features]
 default = ["experimental"]
 experimental = ["bluer", "btleplug", "windows"]
-
-[profile.release]
-lto = true
-opt-level = 3
-codegen-units = 1

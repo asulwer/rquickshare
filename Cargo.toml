@@ -1,0 +1,15 @@
+[workspace]
+members = ["core_lib", "app/main/src-tauri"]
+resolver = "2"
+
+# Single source of truth for the version. Both crates inherit it via
+# `version.workspace = true`, and tauri.conf.json reads it from
+# app/main/src-tauri/Cargo.toml.
+[workspace.package]
+version = "0.12.0"
+
+# Profiles must live at the workspace root (per-crate profiles are ignored).
+[profile.release]
+lto = true
+opt-level = 3
+codegen-units = 1

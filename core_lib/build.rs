@@ -33,6 +33,14 @@ fn main() {
     // Sort it to avoid having the index.ts being different for no reason
     exports.sort();
 
-    let mut file = File::create("./bindings/index.ts").unwrap();
-    file.write_all(exports.join("\n").as_bytes()).unwrap();
+    // Only rewrite index.ts when its content actually changes. Otherwise every
+    // rebuild rewrites the file, which the `tauri dev` watcher detects and uses
+    // to trigger yet another rebuild -> infinite loop.
+    let new_content = exports.join("\n");
+    let index_path = "./bindings/index.ts";
+    let old_content = fs::read_to_string(index_path).unwrap_or_default();
+    if old_content != new_content {
+        let mut file = File::create(index_path).unwrap();
+        file.write_all(new_content.as_bytes()).unwrap();
+    }
 }

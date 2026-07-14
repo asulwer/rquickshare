@@ -20,6 +20,10 @@ pub use blea::*;
 mod blea_win;
 #[cfg(all(feature = "experimental", target_os = "windows"))]
 pub use blea_win::*;
+// Not started yet (issue #425 needs a GATT server); kept as groundwork.
+#[cfg(all(feature = "experimental", target_os = "windows"))]
+mod blea_recv_win;
+mod ble_receiver;
 mod inbound;
 pub use inbound::*;
 pub(crate) mod info;

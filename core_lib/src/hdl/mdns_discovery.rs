@@ -137,7 +137,12 @@ impl MDnsDiscovery {
         // thread doesn't keep trying to deliver events to the now-dropped
         // receiver, which floods the log with "sending on a closed channel".
         let _ = self.daemon.stop_browse(service_type);
-        let _ = self.daemon.shutdown();
+        // Keep the shutdown receiver and await it so the daemon can deliver its
+        // shutdown-complete response instead of logging "failed to send
+        // response of shutdown: sending on a closed channel".
+        if let Ok(receiver) = self.daemon.shutdown() {
+            let _ = receiver.recv_async().await;
+        }
 
         Ok(())
     }

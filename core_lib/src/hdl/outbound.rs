@@ -423,12 +423,8 @@ impl OutboundRequest {
     ) -> Result<(), anyhow::Error> {
         let mut hmac = HmacSha256::new_from_slice(self.state.recv_hmac_key.as_ref().unwrap())?;
         hmac.update(&smsg.header_and_body);
-        if !hmac
-            .finalize()
-            .into_bytes()
-            .as_slice()
-            .eq(smsg.signature.as_slice())
-        {
+        let computed = hmac.finalize().into_bytes();
+        if computed[..] != smsg.signature[..] {
             return Err(anyhow!("hmac!=signature"));
         }
 

@@ -129,8 +129,11 @@ impl MDnsServer {
 
         // Shut the daemon down so its background thread stops cleanly instead
         // of being orphaned, which otherwise floods the log with
-        // "sending on a closed channel" errors.
-        let _ = self.daemon.shutdown();
+        // "sending on a closed channel" errors. Await the shutdown response so
+        // the daemon doesn't log a "failed to send response of shutdown" error.
+        if let Ok(receiver) = self.daemon.shutdown() {
+            let _ = receiver.recv_async().await;
+        }
 
         Ok(())
     }

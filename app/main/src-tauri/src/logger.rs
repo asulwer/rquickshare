@@ -92,7 +92,7 @@ fn get_log_file_path(
                 file_name,
                 OffsetDateTime::now_utc()
                     .format(
-                        &time::format_description::parse(
+                        &time::format_description::parse_borrowed::<2>(
                             "[year]-[month]-[day]_[hour]-[minute]-[second]"
                         )
                         .unwrap()

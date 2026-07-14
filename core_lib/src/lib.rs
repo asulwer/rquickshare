@@ -154,6 +154,11 @@ impl RQS {
         let ctk = ctoken.clone();
         tracker.spawn(async move { mdns.run(ctk).await });
 
+        // NOTE (issue #425): a BLE "receiver" advertiser is implemented in
+        // hdl::BleReceiverAdvertiser (with the ble_receiver builders, see
+        // BLE_RECEIVER_DISCOVERY.md) but is intentionally NOT started here.
+        // Making a phone list rquickshare over BLE additionally requires a BLE
+        // GATT server to serve the full advertisement, which is not implemented.
         tracker.close();
 
         Ok((send_channel.0, self.ble_sender.subscribe()))
