@@ -5,7 +5,7 @@
 //!
 //! The advertisement is nested across three layers, all transcribed from
 //! Google's open-source implementation (github.com/google/nearby,
-//! connections/implementation/...). See BLE_RECEIVER_DISCOVERY.md for the full
+//! connections/implementation/...). See docs/ble-receiver-discovery.md for the full
 //! spec. Every value below is covered by unit tests against known references.
 //!
 //! Layer 3 (connections advertisement, the "data"):

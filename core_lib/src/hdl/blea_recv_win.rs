@@ -8,7 +8,7 @@
 //! 31-byte legacy limit).
 //!
 //! This is a first attempt at the extended-advertising assembly (see
-//! BLE_RECEIVER_DISCOVERY.md open items) and will be refined against the phone.
+//! docs/ble-receiver-discovery.md open items) and will be refined against the phone.
 #![allow(dead_code)]
 
 use tokio_util::sync::CancellationToken;
