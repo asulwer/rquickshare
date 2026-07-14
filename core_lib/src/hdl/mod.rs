@@ -24,6 +24,11 @@ pub use blea_win::*;
 #[cfg(all(feature = "experimental", target_os = "windows"))]
 mod blea_recv_win;
 mod ble_receiver;
+// Windows soft-AP for the WIFI_HOTSPOT bandwidth-upgrade medium.
+#[cfg(all(feature = "experimental", target_os = "windows"))]
+mod hotspot_win;
+#[cfg(all(feature = "experimental", target_os = "windows"))]
+pub use hotspot_win::*;
 mod inbound;
 pub use inbound::*;
 pub(crate) mod info;

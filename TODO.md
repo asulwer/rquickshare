@@ -24,13 +24,25 @@ best available one. Goal: support them all.
       **not** activate a broadcasting AP on the Intel BE200 (reports Started, no
       virtual adapter appears). **Deprioritized** in favor of Hotspot, which uses
       the same soft-AP and is proven working (below).
-- [ ] **Hotspot (soft-AP)** — **platform layer PROVEN & automated.** rquickshare
-      can programmatically start a soft-AP with a KNOWN ssid/passphrase via
-      `NetworkOperatorTetheringManager` (status Success, state On); the Pixel
-      joins it and reaches a TCP socket on the gateway (`192.168.137.1`) with
-      data flowing. All `WifiHotspotCredentials` fields are controllable.
-      POC: `core_lib/src/bin/hotspot_poc.rs`. **Next:** the bandwidth-upgrade
-      state machine, to offer this medium mid-transfer. **In progress.**
+- [ ] **Hotspot (soft-AP)** — **platform PROVEN + offer implemented; BLOCKED on a
+      Pixel firmware bug.** rquickshare starts a soft-AP with known credentials
+      via `NetworkOperatorTetheringManager` (POC: `core_lib/src/bin/hotspot_poc.rs`),
+      and now offers a WIFI_HOTSPOT bandwidth upgrade at the correct post-accept
+      moment (`accept_transfer`, opt-in via `RQS_TRY_HOTSPOT_UPGRADE`), on a
+      blocking thread so it doesn't stall the handshake. Proto synced to current
+      google/nearby (frame types 8-12, `BandwidthUpgradeRetryFrame`, etc.).
+      **Findings from live testing (Pixel 10, Android 16):** the phone advertises
+      it supports WIFI_HOTSPOT and, for a large file (172 MB), *pauses the
+      transfer* (ack_bytes stays 0) to attempt the upgrade — so it genuinely
+      wants it — but replies `UPGRADE_FAILURE` every time: **it cannot join our
+      soft-AP.** This matches the widely-reported Pixel 10 Quick Share WiFi
+      firmware bug (network-switch during Quick Share is broken). A failed offer
+      also stalls the large transfer (no graceful fallback), so the offer stays
+      OFF by default. **PARKED** pending Google's firmware fix or the Pixel 10
+      Pro. Groundwork saved. **When resuming:** (1) verify the phone can join;
+      (2) build the channel-swap (Increment B: CLIENT_INTRODUCTION ack +
+      LAST_WRITE/SAFE_TO_CLOSE + move the encrypted stream); (3) tear down the
+      hotspot + listener on transfer end (currently leaks port 8899).
 - [ ] **Bluetooth (Classic / RFCOMM)** — low-bandwidth fallback transport.
 - [ ] **WiFi Aware (NAN)** — newer; limited/uneven Windows support.
 - [ ] **WebRTC** — Quick Share uses it via signaling infrastructure; likely

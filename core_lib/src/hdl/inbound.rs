@@ -496,6 +496,145 @@ impl InboundRequest {
         Ok(())
     }
 
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    async fn offer_hotspot_upgrade(&mut self) -> Result<(), anyhow::Error> {
+        use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::{
+            upgrade_path_info::{Medium, WifiHotspotCredentials},
+            EventType, UpgradePathInfo,
+        };
+        use crate::location_nearby_connections::BandwidthUpgradeNegotiationFrame;
+
+        let ssid = format!(
+            "rqs-{}",
+            gen_random(3)
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>()
+        );
+        let passphrase = gen_random(4)
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>();
+        let port: u16 = 8899;
+
+        // Start the soft-AP on a blocking thread: the WinRT calls block for a
+        // couple seconds, and doing that on the async executor stalls the
+        // in-flight handshake frames (which broke the connection previously).
+        let (ssid_c, passphrase_c) = (ssid.clone(), passphrase.clone());
+        let creds = match tokio::task::spawn_blocking(
+            move || -> Result<crate::hdl::HotspotCredentials, anyhow::Error> {
+                let (hotspot, creds) = crate::hdl::WindowsHotspot::start(&ssid_c, &passphrase_c)?;
+                // Keep the AP up for the duration of the transfer.
+                std::mem::forget(hotspot);
+                Ok(creds)
+            },
+        )
+        .await
+        {
+            Ok(Ok(creds)) => creds,
+            Ok(Err(e)) => {
+                warn!("Bandwidth upgrade: hotspot start failed: {}", e);
+                return Ok(());
+            }
+            Err(e) => {
+                warn!("Bandwidth upgrade: hotspot task join failed: {}", e);
+                return Ok(());
+            }
+        };
+        info!(
+            "Bandwidth upgrade: hotspot up (ssid={}, gateway={}, port={})",
+            creds.ssid, creds.gateway, port
+        );
+
+        // Observe whether the phone joins the AP and connects to the socket.
+        tokio::spawn(async move {
+            match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await {
+                Ok(l) => {
+                    info!("Bandwidth upgrade: listening on 0.0.0.0:{}", port);
+                    match l.accept().await {
+                        Ok((mut s, addr)) => {
+                            info!("*** Bandwidth upgrade: phone connected from {} ***", addr);
+                            let mut buf = [0u8; 256];
+                            if let Ok(n) = tokio::io::AsyncReadExt::read(&mut s, &mut buf).await {
+                                info!(
+                                    "Bandwidth upgrade: first {} bytes: {:02x?}",
+                                    n,
+                                    &buf[..n]
+                                );
+                            }
+                        }
+                        Err(e) => warn!("Bandwidth upgrade: accept failed: {}", e),
+                    }
+                }
+                Err(e) => warn!("Bandwidth upgrade: bind failed: {}", e),
+            }
+        });
+
+        let frame = OfflineFrame {
+            version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
+            v1: Some(location_nearby_connections::V1Frame {
+                r#type: Some(
+                    location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation
+                        .into(),
+                ),
+                bandwidth_upgrade_negotiation: Some(BandwidthUpgradeNegotiationFrame {
+                    event_type: Some(EventType::UpgradePathAvailable.into()),
+                    upgrade_path_info: Some(UpgradePathInfo {
+                        medium: Some(Medium::WifiHotspot.into()),
+                        wifi_hotspot_credentials: Some(WifiHotspotCredentials {
+                            ssid: Some(creds.ssid),
+                            password: Some(creds.passphrase),
+                            port: Some(port as i32),
+                            gateway: Some(creds.gateway),
+                            frequency: Some(-1),
+                        }),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        };
+        self.encrypt_and_send(&frame).await?;
+        info!("Bandwidth upgrade: sent UPGRADE_PATH_AVAILABLE (WIFI_HOTSPOT)");
+        Ok(())
+    }
+
+    #[cfg(not(all(feature = "experimental", target_os = "windows")))]
+    async fn offer_hotspot_upgrade(&mut self) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
+
+    // Respond to the phone's BANDWIDTH_UPGRADE_RETRY(is_request) by telling it
+    // which mediums we support, so it can drive the upgrade toward WIFI_HOTSPOT.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    async fn send_supported_mediums(&mut self) -> Result<(), anyhow::Error> {
+        use crate::location_nearby_connections::bandwidth_upgrade_retry_frame::Medium;
+        use crate::location_nearby_connections::BandwidthUpgradeRetryFrame;
+
+        let frame = OfflineFrame {
+            version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
+            v1: Some(location_nearby_connections::V1Frame {
+                r#type: Some(
+                    location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeRetry.into(),
+                ),
+                bandwidth_upgrade_retry: Some(BandwidthUpgradeRetryFrame {
+                    supported_medium: vec![Medium::WifiHotspot.into(), Medium::WifiLan.into()],
+                    is_request: Some(false),
+                }),
+                ..Default::default()
+            }),
+        };
+        self.encrypt_and_send(&frame).await?;
+        info!("Bandwidth upgrade: replied with supported mediums [WIFI_HOTSPOT, WIFI_LAN]");
+        Ok(())
+    }
+
+    #[cfg(not(all(feature = "experimental", target_os = "windows")))]
+    async fn send_supported_mediums(&mut self) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
+
     async fn decrypt_and_process_secure_message(
         &mut self,
         smsg: &SecureMessage,
@@ -726,6 +865,42 @@ impl InboundRequest {
             location_nearby_connections::v1_frame::FrameType::KeepAlive => {
                 trace!("Sending keepalive");
                 self.send_keepalive(true).await?;
+            }
+            location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation => {
+                info!(
+                    "Received BandwidthUpgradeNegotiation: {:?}",
+                    v1_frame.bandwidth_upgrade_negotiation
+                );
+                let is_path_request = v1_frame
+                    .bandwidth_upgrade_negotiation
+                    .as_ref()
+                    .map(|bun| {
+                        bun.event_type()
+                            == location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType::UpgradePathRequest
+                    })
+                    .unwrap_or(false);
+                if is_path_request {
+                    info!("Phone requested an upgrade path; offering WIFI_HOTSPOT");
+                    if let Err(e) = self.offer_hotspot_upgrade().await {
+                        warn!("offer_hotspot_upgrade (on request) failed: {}", e);
+                    }
+                }
+            }
+            location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeRetry => {
+                info!(
+                    "Received BandwidthUpgradeRetry: {:?}",
+                    v1_frame.bandwidth_upgrade_retry
+                );
+                let is_request = v1_frame
+                    .bandwidth_upgrade_retry
+                    .as_ref()
+                    .and_then(|f| f.is_request)
+                    .unwrap_or(false);
+                if is_request {
+                    if let Err(e) = self.send_supported_mediums().await {
+                        warn!("send_supported_mediums failed: {}", e);
+                    }
+                }
             }
             _ => {
                 error!("Unhandled offline frame encrypted: {:?}", offline);
@@ -1002,6 +1177,15 @@ impl InboundRequest {
             .await?;
         }
 
+        // Test-only auto-accept (env RQS_AUTO_ACCEPT) so the bandwidth-upgrade
+        // offer can be exercised without the UI Accept card.
+        if std::env::var("RQS_AUTO_ACCEPT").is_ok()
+            && self.state.state == State::WaitingForUserConsent
+        {
+            info!("RQS_AUTO_ACCEPT set — auto-accepting transfer");
+            self.accept_transfer().await?;
+        }
+
         Ok(())
     }
 
@@ -1049,6 +1233,15 @@ impl InboundRequest {
         };
 
         self.send_encrypted_frame(&frame).await?;
+
+        // Option 1: offer the WIFI_HOTSPOT bandwidth upgrade now that the user
+        // has accepted and file bytes are about to flow — the canonical upgrade
+        // point (opt-in via RQS_TRY_HOTSPOT_UPGRADE).
+        if std::env::var("RQS_TRY_HOTSPOT_UPGRADE").is_ok() {
+            if let Err(e) = self.offer_hotspot_upgrade().await {
+                warn!("offer_hotspot_upgrade failed: {}", e);
+            }
+        }
 
         self.update_state(
             |e| {
