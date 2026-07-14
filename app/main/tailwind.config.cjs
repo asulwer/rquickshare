@@ -3,6 +3,8 @@
 const resolve = require('path').resolve
 
 module.exports = {
+	// Follow the OS theme automatically via prefers-color-scheme (no toggle).
+	darkMode: 'media',
 	content: [
 		resolve(__dirname, 'index.html'),
 		resolve(__dirname, 'src/**/*.{vue,ts}'),

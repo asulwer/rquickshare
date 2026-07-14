@@ -220,3 +220,32 @@ body,
 .error circle.bg, .error circle.fg {
     @apply !stroke-red-400
 }
+
+/* Automatic dark theme: follows the OS via prefers-color-scheme (no toggle). */
+html,
+body,
+#app {
+    background-color: #f0fdf4;
+    color: #111827;
+}
+
+@media (prefers-color-scheme: dark) {
+    html,
+    body,
+    #app {
+        background-color: #171717;
+        color: #e5e7eb;
+    }
+
+    /* Status indicator pulse circles are black by default; flip to light. */
+    .status-indicator .circle-main { background: #e5e7eb; }
+    .status-indicator .circle-secondary { background: rgba(229, 231, 235, 0.1); }
+    .status-indicator .circle-tertiary { background: rgba(229, 231, 235, 0.6); }
+    .status-indicator--success .circle-main { background: #e5e7eb; }
+    .status-indicator--success .circle-secondary { background: rgba(229, 231, 235, 0.1); }
+    .status-indicator--success .circle-tertiary { background: rgba(229, 231, 235, 0.4); }
+
+    /* Circular progress ring. */
+    .circular-progress circle.bg { stroke: #3f3f46; }
+    .circular-progress circle.fg { stroke: #e5e7eb; }
+}

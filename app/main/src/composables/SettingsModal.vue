@@ -29,7 +29,7 @@ function openDownloadPicker() {
 
 <template>
 	<div v-if="vm.settingsOpen" class="absolute z-10 w-full h-full flex justify-center items-center bg-black bg-opacity-25">
-		<div class="bg-white rounded-xl shadow-xl p-4 w-[24rem]">
+		<div class="bg-white dark:bg-neutral-800 rounded-xl shadow-xl p-4 w-[24rem]">
 			<div class="flex flex-row justify-between items-center">
 				<h3 class="font-medium text-xl">
 					Settings

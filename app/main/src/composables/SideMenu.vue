@@ -56,7 +56,7 @@ const pluralize = (n: number, s: string) => n === 1 ? s : `${s}s`;
 				<span v-if="'Text' in props.vm.outboundPayload">Sharing text</span>
 				<span v-else>Sharing {{ (props.vm.outboundPayload as any).Files.length }} {{ pluralize((props.vm.outboundPayload as any).Files.length, "file") }}</span>
 			</p>
-			<div class="bg-white w-32 h-32 rounded-2xl mb-2 flex justify-center items-center">
+			<div class="bg-white dark:bg-neutral-700 w-32 h-32 rounded-2xl mb-2 flex justify-center items-center">
 				<svg
 					xmlns="http://www.w3.org/2000/svg" height="24" viewBox="0 -960 960 960" width="24"
 					class="w-8 h-8">
