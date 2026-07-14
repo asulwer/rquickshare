@@ -235,21 +235,29 @@ export default {
 
 	mounted: function () {
 		nextTick(async () => {
-			this.hostname = await invoke('get_hostname');
+			try {
+					this.hostname = await invoke('get_hostname');
 			this.version = await getVersion();
 
 			await this.getVisibility(this);
 
-			if (!await this.store.has(autostartKey)) {
-				await this.setAutoStart(this, true);
-			} else {
-				await this.applyAutoStart(this);
+			try {
+				if (!await this.store.has(autostartKey)) {
+					await this.setAutoStart(this, true);
+				} else {
+					await this.applyAutoStart(this);
+				}
+			} catch (autostartErr) {
+				console.warn('[rqs] autostart unavailable (expected under `tauri dev`):', autostartErr);
 			}
 
 			await this.getRealclose(this);
 			await this.getStartMinimized(this);
 			await this.getClipboardAutosync(this);
 			await this.getDownloadPath(this);
+				} catch (e) {
+					console.error('[rqs] startup settings init failed (continuing to register listeners):', e);
+				}
 
 			// Check permission for notification
 			let permissionGranted = await isPermissionGranted();
@@ -261,7 +269,7 @@ export default {
 			this.unlisten.push(
 				await listen('rs2js_channelmessage', async (event) => {
 					const cm = event.payload as ChannelMessage;
-					const idx = this.requests.findIndex((el) => el.id === cm.id);
+						const idx = this.requests.findIndex((el) => el.id === cm.id);
 
 					if (cm.state === "Disconnected") {
 						this.toDelete.push({
