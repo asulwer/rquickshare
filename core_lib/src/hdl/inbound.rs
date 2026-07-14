@@ -1177,15 +1177,6 @@ impl InboundRequest {
             .await?;
         }
 
-        // Test-only auto-accept (env RQS_AUTO_ACCEPT) so the bandwidth-upgrade
-        // offer can be exercised without the UI Accept card.
-        if std::env::var("RQS_AUTO_ACCEPT").is_ok()
-            && self.state.state == State::WaitingForUserConsent
-        {
-            info!("RQS_AUTO_ACCEPT set — auto-accepting transfer");
-            self.accept_transfer().await?;
-        }
-
         Ok(())
     }
 
