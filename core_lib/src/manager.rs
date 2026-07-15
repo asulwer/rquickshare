@@ -73,7 +73,7 @@ impl TcpServer {
                 Some(i) = self.connect_receiver.recv() => {
                     info!("{INNER_NAME}: connect_receiver: got {:?}", i);
                     if let Err(e) = self.connect(cctk, i).await {
-                        error!("{INNER_NAME}: error sending: {}", e.to_string());
+                        error!("{INNER_NAME}: error sending: {e}");
                     }
                 }
                 r = self.tcp_listener.accept() => {

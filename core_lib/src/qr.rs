@@ -18,8 +18,8 @@ use anyhow::anyhow;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use hkdf::Hkdf;
-use p256::elliptic_curve::rand_core::OsRng;
-use p256::elliptic_curve::sec1::ToEncodedPoint;
+use p256::elliptic_curve::sec1::ToSec1Point;
+use p256::elliptic_curve::Generate;
 use p256::SecretKey;
 use sha2::Sha256;
 
@@ -49,8 +49,8 @@ impl QrSession {
         // Only the public half goes in the QR. The private half is needed only
         // to skip the peer's accept prompt (`qr_code_handshake_data`), which we
         // don't do, so we don't retain it.
-        let secret = SecretKey::random(&mut OsRng);
-        let point = secret.public_key().to_encoded_point(true);
+        let secret = SecretKey::generate();
+        let point = secret.public_key().to_sec1_point(true);
 
         // key param = 2-byte version (0) + SEC1 compressed point (0x02|0x03 || X)
         let mut key_param = Vec::with_capacity(35);

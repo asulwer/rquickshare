@@ -134,11 +134,7 @@ impl RQS {
         self.tracker = Some(tracker.clone());
         self.ctoken = Some(ctoken.clone());
 
-        let endpoint_id: Vec<u8> = rand::rng()
-            .sample_iter(Alphanumeric)
-            .take(4)
-            .map(u8::from)
-            .collect();
+        let endpoint_id: Vec<u8> = rand::rng().sample_iter(Alphanumeric).take(4).collect();
         // Bind dual-stack so peers can reach us over IPv4 or IPv6. If the
         // platform won't hand us a dual-stack socket, fall back to IPv4-only
         // rather than failing to start.

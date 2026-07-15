@@ -152,7 +152,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| match event {
-            tauri::RunEvent::Ready { .. } => {
+            tauri::RunEvent::Ready => {
                 trace!("RunEvent::Ready");
                 if get_startminimized(app_handle) {
                     #[cfg(not(target_os = "macos"))]
@@ -298,12 +298,12 @@ fn rs2js_channelmessage(message: ChannelMessage, manager: &AppHandle) {
         return;
     }
 
-    info!("rs2js_channelmessage: {:?}", &message);
+    info!("rs2js_channelmessage: {message:?}");
     manager.emit("rs2js_channelmessage", &message).unwrap();
 }
 
 fn rs2js_endpointinfo(message: EndpointInfo, manager: &AppHandle) {
-    info!("rs2js_endpointinfo: {:?}", &message);
+    info!("rs2js_endpointinfo: {message:?}");
     manager.emit("rs2js_endpointinfo", &message).unwrap();
 }
 

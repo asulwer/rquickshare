@@ -8,7 +8,7 @@ use bytes::Bytes;
 use get_if_addrs::get_if_addrs;
 use hkdf::Hkdf;
 use num_bigint::{BigUint, ToBigInt};
-use p256::elliptic_curve::rand_core::OsRng;
+use p256::elliptic_curve::Generate;
 use p256::{PublicKey, SecretKey};
 use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -207,7 +207,7 @@ pub async fn stream_read_exact(
 }
 
 pub fn gen_ecdsa_keypair() -> (SecretKey, PublicKey) {
-    let secret_key = SecretKey::random(&mut OsRng);
+    let secret_key = SecretKey::generate();
     let public_key = secret_key.public_key();
 
     (secret_key, public_key)

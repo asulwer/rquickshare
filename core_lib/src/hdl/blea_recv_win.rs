@@ -4,6 +4,7 @@
 //! phone doing BLE-only discovery can list this machine as a target:
 //!   - service data under 0xFEF3 = the advertisement header
 //!   - service data under the slot-0 advertisement UUID = the full advertisement
+//!
 //! Both are placed in a BLE 5 *extended* advertisement (the payload exceeds the
 //! 31-byte legacy limit).
 //!

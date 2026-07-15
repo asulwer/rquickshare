@@ -6,11 +6,11 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use bytes::Bytes;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use libaes::{Cipher, AES_256_KEY_LEN};
 use p256::ecdh::diffie_hellman;
-use p256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
-use p256::{EncodedPoint, PublicKey};
+use p256::elliptic_curve::sec1::{FromSec1Point, ToSec1Point};
+use p256::{PublicKey, Sec1Point};
 use prost::Message;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -253,7 +253,7 @@ impl OutboundRequest {
     pub async fn send_ukey2_client_init(&mut self) -> Result<(), anyhow::Error> {
         let (secret_key, public_key) = gen_ecdsa_keypair();
 
-        let encoded_point = public_key.to_encoded_point(false);
+        let encoded_point = public_key.to_sec1_point(false);
         let x = encoded_point.x().unwrap();
         let y = encoded_point.y().unwrap();
 
@@ -1096,11 +1096,11 @@ impl OutboundRequest {
             bytes.extend_from_slice(&peer_p256_key.y);
         }
 
-        let encoded_point = EncodedPoint::from_bytes(bytes)?;
+        let encoded_point = Sec1Point::from_bytes(bytes)?;
         // `from_bytes` only validates the *encoding*; the point may still not lie
-        // on the curve, in which case `from_encoded_point` yields none and
+        // on the curve, in which case `from_sec1_point` yields none and
         // CtOption::unwrap() would panic on peer-supplied bytes.
-        let peer_key: PublicKey = Option::from(PublicKey::from_encoded_point(&encoded_point))
+        let peer_key: PublicKey = Option::from(PublicKey::from_sec1_point(&encoded_point))
             .ok_or_else(|| anyhow!("Invalid peer public key: point is not on the P-256 curve"))?;
         let priv_key = self.state.private_key.as_ref().unwrap();
 

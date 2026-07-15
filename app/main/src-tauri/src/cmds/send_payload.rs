@@ -7,7 +7,7 @@ pub async fn send_payload(
     message: SendInfo,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    info!("send_payload: {:?}", &message);
+    info!("send_payload: {message:?}");
 
     state
         .sender_file
