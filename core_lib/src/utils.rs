@@ -195,18 +195,6 @@ pub fn parse_endpoint_info_bytes(bytes: &[u8]) -> Result<EndpointInfoRecord, any
     })
 }
 
-/// Device type and name of a *visible* endpoint.
-///
-/// Hidden endpoints have no plaintext name; use [`parse_endpoint_info`] to
-/// handle those.
-pub fn parse_mdns_endpoint_info(encoded_str: &str) -> Result<(DeviceType, String), anyhow::Error> {
-    let record = parse_endpoint_info(encoded_str)?;
-    let device_name = record
-        .device_name
-        .ok_or_else(|| anyhow!("Endpoint is hidden: no plaintext name"))?;
-
-    Ok((record.device_type, device_name))
-}
 
 pub async fn stream_read_exact(
     socket: &mut TcpStream,
@@ -313,14 +301,11 @@ mod tests {
         let device_name = "a_device_name";
         let device_type = DeviceType::Laptop;
 
-        dbg!(&device_type);
-        dbg!(device_type.clone() as u8);
-
         let info = gen_mdns_endpoint_info(device_type.clone() as u8, device_name);
-        let parse_info = parse_mdns_endpoint_info(&info).unwrap();
+        let record = parse_endpoint_info(&info).unwrap();
 
-        assert_eq!(parse_info.1, device_name);
-        assert_eq!(parse_info.0, device_type);
+        assert_eq!(record.device_name.as_deref(), Some(device_name));
+        assert_eq!(record.device_type, device_type);
     }
 
     #[test]
@@ -366,17 +351,6 @@ mod tests {
         assert_eq!(record.device_name, None);
         assert!(record.tlvs.is_empty());
         assert_eq!(record.tlv(TLV_TYPE_QR_CODE), None);
-    }
-
-    /// The old parser required >= 19 bytes and always read a name, so a hidden
-    /// peer either errored or misparsed. It must now report hidden cleanly.
-    #[test]
-    fn test_hidden_endpoint_rejected_by_name_only_helper() {
-        let bytes = hex::decode("328900d62e98303608c6f2654f36e9b2b5").unwrap();
-        let encoded = URL_SAFE_NO_PAD.encode(&bytes);
-
-        assert!(parse_endpoint_info(&encoded).is_ok());
-        assert!(parse_mdns_endpoint_info(&encoded).is_err());
     }
 
     #[test]

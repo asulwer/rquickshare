@@ -12,6 +12,7 @@ export interface TauriVM {
 	store: Store;
     isAppInForeground: boolean;
     discoveryRunning: boolean;
+    qrSvg: string | undefined;
     isDragHovering: boolean;
     requests: ChannelMessage[];
     endpointsInfo: EndpointInfo[];

@@ -11,6 +11,18 @@
 			<div class="flex-1 flex flex-col bg-white dark:bg-neutral-800 w-full max-w-full min-w-0 min-h-full rounded-tl-[3rem] p-12 h-1 overflow-y-scroll">
 				<ContentStatus :vm="vm" @outbound-payload="(el: OutboundPayload) => outboundPayload = el" @discovery-running="discoveryRunning = true;" />
 
+				<!-- Scanning this makes a phone advertise itself to us even when
+				     it isn't set to "Everyone" visibility - the scan is the
+				     authorization, so no settings dive is needed. -->
+				<div
+					v-if="qrDataUri"
+					class="w-full rounded-3xl flex flex-col items-center gap-3 p-4 mb-4 bg-green-100 dark:bg-neutral-700">
+					<p class="text-sm text-center">
+						Device not showing up? Scan this with it - no need to switch it to "Everyone".
+					</p>
+					<img :src="qrDataUri" alt="Quick Share QR code" class="w-44 h-44 rounded-xl bg-white p-2">
+				</div>
+
 				<div
 					v-for="item in displayedItems" :key="item.id" class="w-full rounded-3xl flex flex-row gap-6 p-4 mb-4 bg-green-100 dark:bg-neutral-700"
 					:class="{'cursor-pointer': item.endpoint}" @click="item.endpoint && sendInfo(vm, item.id)">
@@ -210,6 +222,10 @@ export default {
 			endpointsInfo: ref<EndpointInfo[]>([]),
 			toDelete: ref<ToDelete[]>([]),
 			outboundPayload: ref<OutboundPayload | undefined>(),
+				// SVG QR code returned by start_discovery. Scanning it makes a
+				// phone advertise itself to us even when it isn't set to
+				// "Everyone" visibility.
+				qrSvg: ref<string | undefined>(undefined),
 
 			// eslint-disable-next-line no-undef
 			cleanupInterval: opt<NodeJS.Timeout>(),
@@ -335,7 +351,7 @@ export default {
 						this.outboundPayload = {
 							Files: event.payload.paths
 						} as OutboundPayload;
-						if (!this.discoveryRunning) await invoke('start_discovery');
+						if (!this.discoveryRunning) this.qrSvg = await invoke('start_discovery');
 						this.discoveryRunning = true;
 					} else {
 						this.isDragHovering = false;
@@ -363,7 +379,7 @@ export default {
 
 				this.lastClipboard = text;
 				this.outboundPayload = { Text: text } as OutboundPayload;
-				if (!this.discoveryRunning) await invoke('start_discovery');
+				if (!this.discoveryRunning) this.qrSvg = await invoke('start_discovery');
 				this.discoveryRunning = true;
 				this.toastStore.addToast("Text ready to send - pick a device", ToastType.Success);
 			};
@@ -387,7 +403,7 @@ export default {
 
 				this.lastClipboard = text;
 				this.outboundPayload = { Text: text } as OutboundPayload;
-				if (!this.discoveryRunning) await invoke('start_discovery');
+				if (!this.discoveryRunning) this.qrSvg = await invoke('start_discovery');
 				this.discoveryRunning = true;
 				this.toastStore.addToast("Clipboard text staged to send - pick a device", ToastType.Success);
 			}, 1500);
@@ -414,6 +430,12 @@ export default {
 		},
 		displayedItems(): Array<DisplayedItem> {
 			return this._displayedItems(this);
+		},
+		// Rendered as an <img> rather than v-html: no raw HTML injection.
+		qrDataUri(): string | undefined {
+			if (!this.qrSvg) return undefined;
+
+			return `data:image/svg+xml;utf8,${encodeURIComponent(this.qrSvg)}`;
 		}
 	},
 

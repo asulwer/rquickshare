@@ -199,6 +199,31 @@ impl RQS {
         &mut self,
         sender: broadcast::Sender<EndpointInfo>,
     ) -> Result<(), anyhow::Error> {
+        self.start_discovery(sender, None)
+    }
+
+    /// Start discovery and return a QR URL to display to the peer.
+    ///
+    /// A phone that opens this URL starts advertising **even while hidden**, so
+    /// this is how we reach a device that isn't set to "Everyone" visibility -
+    /// the scan itself is the authorization. The returned peer arrives on
+    /// `sender` like any other, with the name recovered from its QR data.
+    pub fn discovery_with_qr(
+        &mut self,
+        sender: broadcast::Sender<EndpointInfo>,
+    ) -> Result<String, anyhow::Error> {
+        let session = qr::QrSession::new()?;
+        let url = session.url.clone();
+        self.start_discovery(sender, Some(session))?;
+
+        Ok(url)
+    }
+
+    fn start_discovery(
+        &mut self,
+        sender: broadcast::Sender<EndpointInfo>,
+        qr_session: Option<qr::QrSession>,
+    ) -> Result<(), anyhow::Error> {
         let tracker = self
             .tracker
             .as_ref()
@@ -225,7 +250,10 @@ impl RQS {
             });
         }
 
-        let discovery = MDnsDiscovery::new(sender)?;
+        let mut discovery = MDnsDiscovery::new(sender)?;
+        if let Some(session) = qr_session {
+            discovery = discovery.with_qr_session(session);
+        }
         tracker.spawn(async move { discovery.run(ctk.clone()).await });
 
         Ok(())

@@ -1,5 +1,3 @@
-// TODO: remove once wired into discovery (next step).
-#![allow(dead_code)]
 //! QR-code sharing.
 //!
 //! A sender shows a QR code carrying an ECDSA public key. When a phone opens

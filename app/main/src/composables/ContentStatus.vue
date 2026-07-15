@@ -36,7 +36,7 @@ function openFilePicker() {
 		emits('outboundPayload', {
 			Files: elem
 		} as OutboundPayload);
-		if (!props.vm.discoveryRunning) await props.vm.invoke('start_discovery');
+		if (!props.vm.discoveryRunning) props.vm.qrSvg = await props.vm.invoke('start_discovery');
 		emits('discoveryRunning');
 	})
 }
