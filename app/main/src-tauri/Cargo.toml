@@ -26,7 +26,7 @@ tauri = { version = "2.2", features = [ "devtools", "tray-icon", "native-tls-ven
 tauri-plugin-autostart = "2.2"
 tauri-plugin-process = "2.2"
 tauri-plugin-notification = "2.2"
-tauri-plugin-single-instance = "~2.2.4"
+tauri-plugin-single-instance = "2.2"
 tauri-plugin-store = "2.2"
 tauri-plugin-dialog = "2.2"
 tauri-plugin-shell = "2.2"

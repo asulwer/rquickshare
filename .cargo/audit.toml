@@ -1,0 +1,31 @@
+# cargo-audit configuration.
+#
+# `cargo audit` reads Cargo.lock, which resolves dependencies for *every*
+# target - so it reports crates that are never compiled into this app. Each
+# ignore below is an advisory verified not to apply, with the evidence why.
+#
+# Keep this list short and justified. The point is that a red `cargo audit`
+# always means something real; a permanently noisy audit is one nobody reads.
+
+[advisories]
+ignore = [
+    # quick-xml 0.39.x - two DoS advisories in its XML *parser* (quadratic
+    # attribute scanning; unbounded namespace allocation).
+    #
+    # Not applicable here, for two independent reasons:
+    #
+    #  1. Platform. Reached only via
+    #       wayland-scanner -> wayland-client -> wayland-protocols(-wlr)
+    #       -> wl-clipboard-rs -> arboard -> tauri-plugin-clipboard-manager
+    #     which is Linux/Wayland-only. `cargo tree -i quick-xml@0.39.4` prints
+    #     nothing for a Windows target: it is not in the shipped binary.
+    #
+    #  2. Usage. wayland-scanner is a *proc-macro*: it parses the Wayland
+    #     protocol XML vendored inside the crate, at build time. These
+    #     advisories concern parsing hostile XML; this input is fixed and
+    #     trusted, and none of it exists at runtime.
+    #
+    # Revisit if this fork ever ships a Linux build.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
