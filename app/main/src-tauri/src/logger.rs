@@ -10,6 +10,15 @@ use time::OffsetDateTime;
 
 use crate::store::get_logging_level;
 
+/// Roll the log file over at this size.
+///
+/// Big enough to hold a whole session at `trace` level, which is what makes a
+/// log useful when diagnosing something, while still bounded so it can't fill
+/// the disk. The previous 40 KB cap dated from issue #268 (log filling the
+/// disk); the actual cause there — the mDNS discovery busy-spin — is fixed, and
+/// at trace level that cap rotated the interesting part away within seconds.
+const MAX_LOG_FILE_SIZE: u128 = 5 * 1024 * 1024;
+
 pub fn set_up_logging(app_handle: &AppHandle) -> Result<(), anyhow::Error> {
     let default_level = match std::env::var("RQS_LOG") {
         Ok(r) => {
@@ -66,7 +75,7 @@ pub fn set_up_logging(app_handle: &AppHandle) -> Result<(), anyhow::Error> {
         }
 
         let app_name = &app_handle.package_info().name;
-        let file_logger = fern::log_file(get_log_file_path(&path, app_name, 40000)?)?;
+        let file_logger = fern::log_file(get_log_file_path(&path, app_name, MAX_LOG_FILE_SIZE)?)?;
 
         dispatch.chain(file_logger).apply()?;
     } else {
