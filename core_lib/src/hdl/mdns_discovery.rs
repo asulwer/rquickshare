@@ -9,7 +9,8 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 
-use crate::utils::{is_not_self_ip, parse_mdns_endpoint_info};
+use crate::qr::QrSession;
+use crate::utils::{is_not_self_ip, parse_endpoint_info};
 use crate::DeviceType;
 
 /// How long to wait for a candidate address to accept a connection before
@@ -35,18 +36,35 @@ pub struct EndpointInfo {
     pub port: Option<String>,
     pub rtype: Option<DeviceType>,
     pub present: Option<bool>,
+    /// Set when this peer was found by scanning our QR code. Scanning is itself
+    /// the user choosing us, so the sender connects without further prompting.
+    pub qr_match: Option<bool>,
 }
 
 pub struct MDnsDiscovery {
     daemon: ServiceDaemon,
     sender: broadcast::Sender<EndpointInfo>,
+    /// When set, a *hidden* peer that scanned this session's QR code is also
+    /// reported, using the name recovered from its QR TLV. Without a session,
+    /// hidden peers are skipped: we can neither identify nor name them.
+    qr_session: Option<QrSession>,
 }
 
 impl MDnsDiscovery {
     pub fn new(sender: broadcast::Sender<EndpointInfo>) -> Result<Self, anyhow::Error> {
         let daemon = ServiceDaemon::new()?;
 
-        Ok(Self { daemon, sender })
+        Ok(Self {
+            daemon,
+            sender,
+            qr_session: None,
+        })
+    }
+
+    /// Also look for the peer that scans `session`'s QR code.
+    pub fn with_qr_session(mut self, session: QrSession) -> Self {
+        self.qr_session = Some(session);
+        self
     }
 
     pub async fn run(self, ctk: CancellationToken) -> Result<(), anyhow::Error> {
@@ -95,11 +113,29 @@ impl MDnsDiscovery {
                                         None => continue,
                                     };
 
-                                    // Parse the endpoint info
-                                    let (dt, dn) = match parse_mdns_endpoint_info(n.val_str()) {
+                                    let record = match parse_endpoint_info(n.val_str()) {
                                         Ok(r) => r,
                                         Err(_) => continue
                                     };
+
+                                    // A peer that scanned our QR is recognised whether it
+                                    // is visible or hidden; only a hidden one *depends*
+                                    // on it, since that's the sole way to name it.
+                                    let scanned = self
+                                        .qr_session
+                                        .as_ref()
+                                        .and_then(|s| s.match_endpoint(&record));
+
+                                    let dn = match (record.device_name.clone(), &scanned) {
+                                        (Some(name), _) => name,
+                                        (None, Some(name)) => {
+                                            info!("ServiceResolved: hidden peer scanned our QR code: {name:?}");
+                                            name.clone()
+                                        }
+                                        (None, None) => continue,
+                                    };
+                                    let dt = record.device_type.clone();
+                                    let qr_match = scanned.is_some();
 
                                     let fullname = info.get_fullname().to_string();
 
@@ -135,6 +171,7 @@ impl MDnsDiscovery {
                                             port: Some(port.to_string()),
                                             rtype: Some(dt.clone()),
                                             present: Some(true),
+                                            qr_match: Some(qr_match),
                                         };
                                         info!("ServiceResolved: Resolved a new service: {:?}", ei);
                                         cache.insert(fullname.clone(), ei.clone());

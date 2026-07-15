@@ -131,6 +131,8 @@ async function clearSending(vm: TauriVM, ) {
 	vm.outboundPayload = undefined;
 	vm.discoveryRunning = false;
 	vm.endpointsInfo = [];
+	vm.qrSvg = undefined;
+	vm.qrAutoSent = false;
 }
 
 function removeRequest(vm: TauriVM, id: string) {

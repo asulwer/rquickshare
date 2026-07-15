@@ -29,6 +29,7 @@ windows = { version = "0.58", features = [
 ], optional = true }
 
 [dependencies]
+aes-gcm = "0.10"
 anyhow = "1.0"
 base64 = "0.22"
 btleplug = { version = "0.11", optional = true }

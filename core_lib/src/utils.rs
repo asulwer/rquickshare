@@ -21,7 +21,6 @@ use crate::CUSTOM_DOWNLOAD;
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize, TS)]
 #[ts(export)]
-#[allow(dead_code)]
 pub enum DeviceType {
     Unknown = 0,
     Phone = 1,
@@ -29,7 +28,6 @@ pub enum DeviceType {
     Laptop = 3,
 }
 
-#[allow(dead_code)]
 impl DeviceType {
     pub fn from_raw_value(value: u8) -> Self {
         match value {
@@ -104,23 +102,99 @@ pub fn gen_mdns_endpoint_info(device_type: u8, device_name: &str) -> String {
     URL_SAFE_NO_PAD.encode(&record)
 }
 
-pub fn parse_mdns_endpoint_info(encoded_str: &str) -> Result<(DeviceType, String), anyhow::Error> {
-    let decoded_bytes = URL_SAFE_NO_PAD.decode(encoded_str)?;
-    if decoded_bytes.len() < 19 {
-        return Err(anyhow!("Invalid data length"));
-    }
+/// TLV record type carrying QR-code data (the advertising token, or the
+/// AES-GCM encrypted device name when the peer is hidden).
+pub const TLV_TYPE_QR_CODE: u8 = 1;
 
-    let device_type = (decoded_bytes[0] >> 1) & 0x7;
-    let name_length = decoded_bytes[17] as usize;
-    if 18 + name_length > decoded_bytes.len() {
-        return Err(anyhow!("Invalid name length"));
-    }
-
-    let device_name_bytes = &decoded_bytes[18..18 + name_length];
-    let device_name = String::from_utf8(device_name_bytes.to_vec())?;
-
-    Ok((DeviceType::from_raw_value(device_type), device_name))
+/// Parsed contents of the mDNS `n` (endpoint info) TXT record.
+///
+/// Layout:
+/// - byte 0: version(3 bits) | visibility(1 bit) | device type(3 bits) | reserved(1 bit)
+/// - bytes 1..17: 2-byte salt + 14-byte encrypted metadata key. This identifies
+///   the advertiser's account, but is only meaningful to someone holding the
+///   matching certificate from Google, so we don't interpret it.
+/// - only when *visible*: 1-byte name length, then the UTF-8 device name.
+/// - then: optional TLV records (1-byte type, 1-byte length, value).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EndpointInfoRecord {
+    pub device_type: DeviceType,
+    /// Set when the advertiser is hidden; such a peer publishes no plaintext
+    /// name (it may instead carry an encrypted one in a QR TLV).
+    pub hidden: bool,
+    /// Plaintext device name. Always `None` when `hidden`.
+    pub device_name: Option<String>,
+    /// TLV records following the name, as (type, value).
+    pub tlvs: Vec<(u8, Vec<u8>)>,
 }
+
+impl EndpointInfoRecord {
+    /// Value of the first TLV record with `ttype`, if present.
+    pub fn tlv(&self, ttype: u8) -> Option<&[u8]> {
+        self.tlvs
+            .iter()
+            .find(|(t, _)| *t == ttype)
+            .map(|(_, v)| v.as_slice())
+    }
+}
+
+/// Parse a base64 (URL-safe, unpadded) endpoint info record.
+pub fn parse_endpoint_info(encoded_str: &str) -> Result<EndpointInfoRecord, anyhow::Error> {
+    let decoded_bytes = URL_SAFE_NO_PAD.decode(encoded_str)?;
+    parse_endpoint_info_bytes(&decoded_bytes)
+}
+
+/// Parse a raw (already base64-decoded) endpoint info record.
+pub fn parse_endpoint_info_bytes(bytes: &[u8]) -> Result<EndpointInfoRecord, anyhow::Error> {
+    // The flag byte plus the 16 identity bytes are always present.
+    if bytes.len() < 17 {
+        return Err(anyhow!("Endpoint info too short: {} bytes", bytes.len()));
+    }
+
+    let flags = bytes[0];
+    let hidden = (flags >> 4) & 0x1 == 1;
+    let device_type = DeviceType::from_raw_value((flags >> 1) & 0x7);
+
+    let mut i = 17usize;
+
+    // A hidden advertiser omits the plaintext name entirely.
+    let device_name = if hidden {
+        None
+    } else {
+        let name_length = *bytes.get(i).ok_or_else(|| anyhow!("Missing name length"))? as usize;
+        i += 1;
+        let end = i
+            .checked_add(name_length)
+            .filter(|e| *e <= bytes.len())
+            .ok_or_else(|| anyhow!("Invalid name length {name_length}"))?;
+        let name = String::from_utf8(bytes[i..end].to_vec())?;
+        i = end;
+        Some(name)
+    };
+
+    // Optional TLV records. A malformed/truncated one only costs us the
+    // remainder - keep whatever parsed cleanly rather than failing the peer.
+    let mut tlvs = Vec::new();
+    while i + 2 <= bytes.len() {
+        let ttype = bytes[i];
+        let tlen = bytes[i + 1] as usize;
+        i += 2;
+
+        let end = match i.checked_add(tlen) {
+            Some(e) if e <= bytes.len() => e,
+            _ => break,
+        };
+        tlvs.push((ttype, bytes[i..end].to_vec()));
+        i = end;
+    }
+
+    Ok(EndpointInfoRecord {
+        device_type,
+        hidden,
+        device_name,
+        tlvs,
+    })
+}
+
 
 pub async fn stream_read_exact(
     socket: &mut TcpStream,
@@ -227,13 +301,71 @@ mod tests {
         let device_name = "a_device_name";
         let device_type = DeviceType::Laptop;
 
-        dbg!(&device_type);
-        dbg!(device_type.clone() as u8);
-
         let info = gen_mdns_endpoint_info(device_type.clone() as u8, device_name);
-        let parse_info = parse_mdns_endpoint_info(&info).unwrap();
+        let record = parse_endpoint_info(&info).unwrap();
 
-        assert_eq!(parse_info.1, device_name);
-        assert_eq!(parse_info.0, device_type);
+        assert_eq!(record.device_name.as_deref(), Some(device_name));
+        assert_eq!(record.device_type, device_type);
+    }
+
+    #[test]
+    fn test_parse_visible_endpoint_has_name_and_no_tlvs() {
+        let info = gen_mdns_endpoint_info(DeviceType::Laptop as u8, "a_device_name");
+        let record = parse_endpoint_info(&info).unwrap();
+
+        assert!(!record.hidden);
+        assert_eq!(record.device_name.as_deref(), Some("a_device_name"));
+        assert_eq!(record.device_type, DeviceType::Laptop);
+        assert!(record.tlvs.is_empty());
+    }
+
+    /// Real capture: a hidden Pixel 10 advertising QR data after scanning our
+    /// code. 63 bytes = 1 flag + 16 identity + TLV(type 1, len 44).
+    #[test]
+    fn test_parse_hidden_endpoint_with_qr_tlv() {
+        let bytes = hex::decode(
+            "3288608fe48bf1d142fee5c7e4225c5974012cc95cc656ef7d2ceef9c9025cf1e4\
+             7c1d28ec4e31ad31b4e977413ab8d1720ddff6a36e670fdf2e56f16028fb",
+        )
+        .unwrap();
+        let record = parse_endpoint_info_bytes(&bytes).unwrap();
+
+        // Hidden peers publish no plaintext name...
+        assert!(record.hidden);
+        assert_eq!(record.device_name, None);
+        assert_eq!(record.device_type, DeviceType::Phone);
+
+        // ...but do carry the QR TLV: 12-byte IV + 16-byte ciphertext + 16-byte tag.
+        let qr = record.tlv(TLV_TYPE_QR_CODE).expect("QR TLV present");
+        assert_eq!(qr.len(), 44);
+    }
+
+    /// Real capture: a hidden peer with no QR data (a nearby phone that never
+    /// saw our code). Must parse, and must not invent a TLV.
+    #[test]
+    fn test_parse_hidden_endpoint_without_tlvs() {
+        let bytes = hex::decode("328900d62e98303608c6f2654f36e9b2b5").unwrap();
+        let record = parse_endpoint_info_bytes(&bytes).unwrap();
+
+        assert!(record.hidden);
+        assert_eq!(record.device_name, None);
+        assert!(record.tlvs.is_empty());
+        assert_eq!(record.tlv(TLV_TYPE_QR_CODE), None);
+    }
+
+    #[test]
+    fn test_truncated_tlv_is_ignored_not_fatal() {
+        // Flag + 16 identity + a TLV claiming 200 bytes but carrying 2.
+        let mut bytes = vec![0x32];
+        bytes.extend_from_slice(&[0u8; 16]);
+        bytes.extend_from_slice(&[TLV_TYPE_QR_CODE, 200, 0xaa, 0xbb]);
+
+        let record = parse_endpoint_info_bytes(&bytes).unwrap();
+        assert!(record.tlvs.is_empty());
+    }
+
+    #[test]
+    fn test_too_short_endpoint_info_errors() {
+        assert!(parse_endpoint_info_bytes(&[0x32, 0x00]).is_err());
     }
 }
