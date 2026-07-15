@@ -368,4 +368,161 @@ mod tests {
     fn test_too_short_endpoint_info_errors() {
         assert!(parse_endpoint_info_bytes(&[0x32, 0x00]).is_err());
     }
+
+    #[test]
+    fn test_device_type_from_raw_value() {
+        assert_eq!(DeviceType::from_raw_value(0), DeviceType::Unknown);
+        assert_eq!(DeviceType::from_raw_value(1), DeviceType::Phone);
+        assert_eq!(DeviceType::from_raw_value(2), DeviceType::Tablet);
+        assert_eq!(DeviceType::from_raw_value(3), DeviceType::Laptop);
+
+        // The field is 3 bits wide, so a peer can hand us 4..=7. Those must
+        // degrade to Unknown rather than panic.
+        for v in 4..=7 {
+            assert_eq!(DeviceType::from_raw_value(v), DeviceType::Unknown);
+        }
+    }
+
+    #[test]
+    fn test_remote_device_info_serialize_round_trips() {
+        let rdi = RemoteDeviceInfo {
+            name: "Aaron's PC".to_owned(),
+            device_type: DeviceType::Laptop,
+        };
+
+        let record = parse_endpoint_info_bytes(&rdi.serialize()).unwrap();
+        assert!(!record.hidden);
+        assert_eq!(record.device_name.as_deref(), Some("Aaron's PC"));
+        assert_eq!(record.device_type, DeviceType::Laptop);
+    }
+
+    #[test]
+    fn test_serialize_truncates_overlong_name() {
+        let rdi = RemoteDeviceInfo {
+            name: "a".repeat(300),
+            device_type: DeviceType::Phone,
+        };
+
+        // The name length is a single byte, so it cannot exceed 255.
+        let bytes = rdi.serialize();
+        assert_eq!(bytes[17], 255);
+
+        let record = parse_endpoint_info_bytes(&bytes).unwrap();
+        assert_eq!(record.device_name.unwrap().len(), 255);
+    }
+
+    #[test]
+    fn test_gen_mdns_name_layout() {
+        let raw = URL_SAFE_NO_PAD
+            .decode(gen_mdns_name([0x41, 0x42, 0x43, 0x44]))
+            .unwrap();
+
+        assert_eq!(raw.len(), 10);
+        assert_eq!(raw[0], 0x23); // PCP
+        assert_eq!(&raw[1..5], &[0x41, 0x42, 0x43, 0x44]); // endpoint id
+        assert_eq!(&raw[5..8], &[0xFC, 0x9F, 0x5E]); // Quick Share service id
+        assert_eq!(&raw[8..], &[0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_gen_ecdsa_keypair_is_consistent_and_unique() {
+        let (secret, public) = gen_ecdsa_keypair();
+        assert_eq!(secret.public_key(), public);
+
+        let (other, _) = gen_ecdsa_keypair();
+        assert_ne!(secret.to_bytes(), other.to_bytes());
+    }
+
+    // `encode_point` follows Java BigInteger semantics: it encodes a *value*,
+    // not a fixed-width coordinate.
+
+    #[test]
+    fn test_encode_point_prefixes_zero_when_high_bit_set() {
+        // 0xff alone would read as -1, so a leading zero keeps it positive.
+        assert_eq!(
+            encode_point(Bytes::from_static(&[0xff])).unwrap(),
+            vec![0x00, 0xff]
+        );
+    }
+
+    #[test]
+    fn test_encode_point_leaves_positive_value_alone() {
+        assert_eq!(encode_point(Bytes::from_static(&[0x7f])).unwrap(), vec![0x7f]);
+    }
+
+    #[test]
+    fn test_encode_point_strips_leading_zeros() {
+        assert_eq!(
+            encode_point(Bytes::from_static(&[0x00, 0x00, 0x01])).unwrap(),
+            vec![0x01]
+        );
+    }
+
+    #[test]
+    fn test_encode_point_zero() {
+        assert_eq!(encode_point(Bytes::from_static(&[0x00])).unwrap(), vec![0x00]);
+    }
+
+    /// RFC 5869 A.1 (SHA-256, basic case). A real known-answer test: it pins
+    /// our HKDF wiring to the RFC rather than to itself, so a bad crate upgrade
+    /// fails here instead of on the phone.
+    #[test]
+    fn test_hkdf_matches_rfc5869_test_case_1() {
+        let ikm = hex::decode("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b").unwrap();
+        let salt = hex::decode("000102030405060708090a0b0c").unwrap();
+        let info = hex::decode("f0f1f2f3f4f5f6f7f8f9").unwrap();
+
+        let okm = hkdf_extract_expand(&salt, &ikm, &info, 42).unwrap();
+        assert_eq!(
+            hex::encode(okm),
+            "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf\
+             34007208d5b887185865"
+        );
+    }
+
+    /// RFC 5869 A.3 (SHA-256, empty salt and info).
+    #[test]
+    fn test_hkdf_matches_rfc5869_test_case_3() {
+        let ikm = hex::decode("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b").unwrap();
+
+        let okm = hkdf_extract_expand(&[], &ikm, &[], 42).unwrap();
+        assert_eq!(
+            hex::encode(okm),
+            "8da4e775a563c18f715f802a063c5a31b8a11f5c5ee1879ec3454e5f3c738d2d\
+             9d201395faa4b61a96c8"
+        );
+    }
+
+    #[test]
+    fn test_hkdf_rejects_output_longer_than_255_hashes() {
+        // HKDF-SHA256 can emit at most 255 * HashLen bytes.
+        assert!(hkdf_extract_expand(b"salt", b"ikm", b"info", 255 * 32).is_ok());
+        assert!(hkdf_extract_expand(b"salt", b"ikm", b"info", 255 * 32 + 1).is_err());
+    }
+
+    #[test]
+    fn test_to_four_digit_string_known_values() {
+        assert_eq!(to_four_digit_string(&vec![]), "0000");
+        assert_eq!(to_four_digit_string(&vec![0, 0, 0, 0]), "0000");
+        assert_eq!(to_four_digit_string(&vec![1]), "0001");
+
+        // 1*1 + 1*31 = 32
+        assert_eq!(to_four_digit_string(&vec![1, 1]), "0032");
+
+        // Bytes are read as *signed*: 0xff is -1, and the result is abs()'d.
+        assert_eq!(to_four_digit_string(&vec![0xff]), "0001");
+    }
+
+    #[test]
+    fn test_gen_random_length_and_distinctness() {
+        assert_eq!(gen_random(0).len(), 0);
+        assert_eq!(gen_random(32).len(), 32);
+        assert_ne!(gen_random(32), gen_random(32));
+    }
+
+    #[test]
+    fn test_is_not_self_ip_for_documentation_address() {
+        // TEST-NET-3: reserved for documentation, never on a real interface.
+        assert!(is_not_self_ip(&"203.0.113.1".parse().unwrap()));
+    }
 }
