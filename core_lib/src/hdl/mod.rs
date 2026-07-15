@@ -34,7 +34,6 @@ pub use mdns::*;
 mod outbound;
 pub use outbound::*;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, PartialEq)]
 #[ts(export)]
 pub enum State {

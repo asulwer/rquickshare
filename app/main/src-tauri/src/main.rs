@@ -19,7 +19,7 @@ use tauri::{
     AppHandle, Emitter, Manager, Window, WindowEvent,
 };
 use tauri_plugin_autostart::MacosLauncher;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch, Mutex as AsyncMutex};
 
 use crate::logger::set_up_logging;
 use crate::notification::{send_request_notification, send_temporarily_notification};
@@ -38,7 +38,9 @@ pub struct AppState {
     pub visibility_sender: Arc<Mutex<watch::Sender<Visibility>>>,
     pub sender_file: mpsc::Sender<SendInfo>,
     pub ble_receiver: broadcast::Receiver<()>,
-    pub rqs: Mutex<RQS>,
+    // Async mutex: `stop()` is awaited while held, which a std::sync::Mutex
+    // cannot safely do (its guard isn't meant to live across an await point).
+    pub rqs: AsyncMutex<RQS>,
 }
 
 #[tokio::main]
@@ -137,7 +139,7 @@ async fn main() -> Result<(), anyhow::Error> {
                         visibility_sender: rqs.visibility_sender.clone(),
                         sender_file,
                         ble_receiver,
-                        rqs: Mutex::new(rqs),
+                        rqs: AsyncMutex::new(rqs),
                     });
                 });
             });
@@ -318,9 +320,8 @@ fn kill_app(app_handle: &AppHandle) {
     let state: tauri::State<'_, AppState> = app_handle.state();
 
     tokio::task::block_in_place(|| {
-        #[allow(clippy::await_holding_lock)]
         tauri::async_runtime::block_on(async move {
-            let _ = state.rqs.lock().unwrap().stop().await;
+            let _ = state.rqs.lock().await.stop().await;
         });
     });
 

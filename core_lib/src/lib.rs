@@ -47,6 +47,7 @@ pub mod channel;
 mod errors;
 mod hdl;
 mod manager;
+mod qr;
 mod utils;
 
 pub use hdl::{EndpointInfo, OutboundPayload, State, Visibility};

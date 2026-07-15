@@ -3,12 +3,17 @@ use std::path::PathBuf;
 use crate::AppState;
 
 #[tauri::command]
-pub fn change_download_path(message: Option<String>, state: tauri::State<'_, AppState>) {
+pub async fn change_download_path(
+    message: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
     info!("change_download_path: {message:?}");
 
     state
         .rqs
         .lock()
-        .unwrap()
+        .await
         .set_download_path(message.map(PathBuf::from));
+
+    Ok(())
 }

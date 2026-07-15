@@ -22,7 +22,6 @@ pub enum Visibility {
     Temporarily = 2,
 }
 
-#[allow(dead_code)]
 impl Visibility {
     pub fn from_raw_value(value: u64) -> Self {
         match value {

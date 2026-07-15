@@ -7,14 +7,16 @@ pub async fn start_discovery(state: tauri::State<'_, AppState>) -> Result<(), St
     state
         .rqs
         .lock()
-        .unwrap()
+        .await
         .discovery(state.dch_sender.clone())
         .map_err(|e| format!("unable to start discovery: {}", e))
 }
 
 #[tauri::command]
-pub fn stop_discovery(state: tauri::State<'_, AppState>) {
+pub async fn stop_discovery(state: tauri::State<'_, AppState>) -> Result<(), String> {
     info!("stop_discovery");
 
-    state.rqs.lock().unwrap().stop_discovery();
+    state.rqs.lock().await.stop_discovery();
+
+    Ok(())
 }
