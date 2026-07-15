@@ -7,7 +7,7 @@ pub fn send_to_rs(
     message: ChannelMessage,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    info!("send_to_rs: {:?}", &message);
+    info!("send_to_rs: {message:?}");
 
     match state.message_sender.send(message) {
         Ok(_) => Ok(()),

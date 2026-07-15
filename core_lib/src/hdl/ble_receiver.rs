@@ -96,8 +96,8 @@ fn murmur3_x64_128(data: &[u8], seed: u32) -> (u64, u64) {
     let mut k1: u64 = 0;
     let mut k2: u64 = 0;
     if l > 8 {
-        for i in 8..l {
-            k2 ^= (tail[i] as u64) << (8 * (i - 8));
+        for (i, &b) in tail[8..].iter().enumerate() {
+            k2 ^= (b as u64) << (8 * i);
         }
         k2 = k2.wrapping_mul(C2);
         k2 = k2.rotate_left(33);
@@ -105,8 +105,8 @@ fn murmur3_x64_128(data: &[u8], seed: u32) -> (u64, u64) {
         h2 ^= k2;
     }
     if l > 0 {
-        for i in 0..l.min(8) {
-            k1 ^= (tail[i] as u64) << (8 * i);
+        for (i, &b) in tail.iter().take(8).enumerate() {
+            k1 ^= (b as u64) << (8 * i);
         }
         k1 = k1.wrapping_mul(C1);
         k1 = k1.rotate_left(31);
@@ -206,7 +206,7 @@ pub fn build_advertisement_header(
     let mut out = Vec::new();
     let mut b = (2u8 << 5) & 0xE0; // version kV2
     if extended_advertisement {
-        b |= (1 << 4) & 0x10;
+        b |= 0x10; // bit 4
     }
     b |= num_slots & 0x1F;
     out.push(b);
