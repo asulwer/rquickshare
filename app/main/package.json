@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "cross-env RUST_BACKTRACE=1 concurrently -k \"tauri dev\" \"pnpm devtools\"",
+    "dev": "cross-env RUST_BACKTRACE=1 VITE_VUE_DEVTOOLS=1 concurrently -k \"tauri dev\" \"pnpm devtools\"",
     "tauri": "tauri",
     "build:debug": "tauri build -d",
     "build": "tauri build",

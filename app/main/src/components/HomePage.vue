@@ -441,7 +441,7 @@ export default {
 			return this.displayedItems.length == 0
 		},
 		displayedItems(): Array<DisplayedItem> {
-			return this._displayedItems(this);
+			return this.computeDisplayedItems(this);
 		},
 		// Rendered as an <img> rather than v-html: no raw HTML injection.
 		qrDataUri(): string | undefined {

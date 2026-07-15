@@ -1109,7 +1109,11 @@ impl InboundRequest {
         }
 
         let encoded_point = EncodedPoint::from_bytes(bytes)?;
-        let peer_key = PublicKey::from_encoded_point(&encoded_point).unwrap();
+        // `from_bytes` only validates the *encoding*; the point may still not lie
+        // on the curve, in which case `from_encoded_point` yields none and
+        // CtOption::unwrap() would panic on peer-supplied bytes.
+        let peer_key: PublicKey = Option::from(PublicKey::from_encoded_point(&encoded_point))
+            .ok_or_else(|| anyhow!("Invalid peer public key: point is not on the P-256 curve"))?;
         let priv_key = self.state.private_key.as_ref().unwrap();
 
         let dhs = diffie_hellman(priv_key.to_nonzero_scalar(), peer_key.as_affine());
