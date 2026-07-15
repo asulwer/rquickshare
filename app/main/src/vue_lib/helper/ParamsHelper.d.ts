@@ -14,6 +14,7 @@ export interface TauriVM {
     discoveryRunning: boolean;
     qrSvg: string | undefined;
     qrAutoSent: boolean;
+    debugLevel: string;
     isDragHovering: boolean;
     requests: ChannelMessage[];
     endpointsInfo: EndpointInfo[];

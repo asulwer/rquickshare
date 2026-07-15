@@ -1,6 +1,6 @@
 import { Visibility } from '@martichou/core_lib/bindings/Visibility';
 import { TauriVM } from './helper/ParamsHelper';
-import { autostartKey, clipboardAutosyncKey, DisplayedItem, downloadPathKey, numberToVisibility, realcloseKey, startminimizedKey, stateToDisplay, visibilityKey, visibilityToNumber } from './types';
+import { autostartKey, clipboardAutosyncKey, debugLevelKey, DisplayedItem, downloadPathKey, numberToVisibility, realcloseKey, startminimizedKey, stateToDisplay, visibilityKey, visibilityToNumber } from './types';
 import { SendInfo } from '@martichou/core_lib/bindings/SendInfo';
 import { ChannelMessage } from '@martichou/core_lib/bindings/ChannelMessage';
 import { ChannelAction } from '@martichou/core_lib';
@@ -99,6 +99,20 @@ async function setClipboardAutosync(vm: TauriVM, clipboardAutosync: boolean) {
 	await vm.store.set(clipboardAutosyncKey, clipboardAutosync);
 	await vm.store.save();
 	vm.clipboardAutosync = clipboardAutosync;
+}
+
+async function setLoggingLevel(vm: TauriVM, level: string) {
+	// Applies to the running app immediately, and is persisted so the next
+	// launch (including one started at boot, which can't be given RQS_LOG)
+	// starts at this level.
+	await vm.invoke('change_logging_level', { message: level });
+	await vm.store.set(debugLevelKey, level);
+	await vm.store.save();
+	vm.debugLevel = level;
+}
+
+async function getLoggingLevel(vm: TauriVM) {
+	vm.debugLevel = await vm.store.get(debugLevelKey) ?? 'info';
 }
 
 async function getClipboardAutosync(vm: TauriVM) {
@@ -223,6 +237,8 @@ export const utils = {
 	setVisibility,
 	getVisibility,
 	invertVisibility,
+	setLoggingLevel,
+	getLoggingLevel,
 	clearSending,
 	removeRequest,
 	sendInfo,

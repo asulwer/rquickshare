@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { utils } from '../vue_lib';
+import { loggingLevels, utils } from '../vue_lib';
 import { PropType } from 'vue';
 import { TauriVM } from '../vue_lib/helper/ParamsHelper';
 
@@ -61,6 +61,22 @@ function openDownloadPicker() {
 					<label class="cursor-pointer flex flex-row justify-between items-center" @click="utils.setClipboardAutosync(vm, !vm.clipboardAutosync)">
 						<span class="label-text">Auto-stage clipboard text</span>
 						<input type="checkbox" :checked="vm.clipboardAutosync" class="checkbox focus:outline-none">
+					</label>
+				</div>
+				<div class="form-control hover:bg-gray-500 hover:bg-opacity-10 rounded-xl p-3">
+					<label class="flex flex-row justify-between items-center gap-3">
+						<span class="flex flex-col items-start">
+							<span class="label-text">Logging level</span>
+							<span class="text-xs opacity-70">Applies immediately. Use "trace" to capture a problem.</span>
+						</span>
+						<select
+							class="rounded-xl bg-transparent border border-gray-500 border-opacity-30 px-2 py-1 text-sm cursor-pointer focus:outline-none"
+							:value="vm.debugLevel"
+							@change="utils.setLoggingLevel(vm, ($event.target as HTMLSelectElement).value)">
+							<option v-for="level in loggingLevels" :key="level" :value="level" class="text-black">
+								{{ level }}
+							</option>
+						</select>
 					</label>
 				</div>
 				<div class="form-control hover:bg-gray-500 hover:bg-opacity-10 rounded-xl p-3">

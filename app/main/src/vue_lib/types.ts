@@ -45,6 +45,10 @@ export const startminimizedKey = "startminimized";
 export const clipboardAutosyncKey = "clipboard_autosync";
 export const visibilityKey = "visibility";
 export const downloadPathKey = "download_path";
+// Read by the Rust side at startup (store.rs::get_logging_level).
+export const debugLevelKey = "debug_level";
+
+export const loggingLevels = ["error", "warn", "info", "debug", "trace"];
 export const stateToDisplay: Array<Partial<State>> = ["ReceivedPairedKeyResult", "WaitingForUserConsent", "ReceivingFiles", "Disconnected",
 	"Finished", "SentIntroduction", "SendingFiles", "Cancelled", "Rejected"]
 
