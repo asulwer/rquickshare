@@ -30,6 +30,7 @@ function _displayedItems(vm: TauriVM): Array<DisplayedItem> {
 			endpoint: false,
 
 			state: el.state ?? undefined,
+			transferType: el.rtype ?? undefined,
 			pin_code: el.meta?.pin_code ?? undefined,
 			destination: el.meta?.destination ?? undefined,
 			files: el.meta?.files ?? undefined,

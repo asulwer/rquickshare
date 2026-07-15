@@ -1,6 +1,7 @@
 #[macro_use]
 extern crate log;
 
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -12,6 +13,7 @@ use hdl::MDnsDiscovery;
 use once_cell::sync::Lazy;
 use rand::distr::Alphanumeric;
 use rand::Rng;
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio_util::sync::CancellationToken;
@@ -21,6 +23,25 @@ use tokio_util::task::TaskTracker;
 use crate::hdl::BleListener;
 use crate::hdl::MDnsServer;
 use crate::manager::TcpServer;
+
+/// Bind a TCP listener that accepts both IPv4 and IPv6 peers.
+///
+/// Windows (and some BSDs) default `IPV6_V6ONLY` to on, which would make an
+/// `[::]` socket refuse IPv4 connections, so clear it explicitly to get a
+/// single dual-stack socket.
+fn bind_dual_stack(port: u32) -> Result<TcpListener, anyhow::Error> {
+    let port: u16 = port
+        .try_into()
+        .map_err(|_| anyhow!("invalid port number: {port}"))?;
+    let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port);
+    let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_only_v6(false)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&addr.into())?;
+    socket.listen(128)?;
+
+    Ok(TcpListener::from_std(socket.into())?)
+}
 
 pub mod channel;
 mod errors;
@@ -117,8 +138,17 @@ impl RQS {
             .take(4)
             .map(u8::from)
             .collect();
-        let tcp_listener =
-            TcpListener::bind(format!("0.0.0.0:{}", self.port_number.unwrap_or(0))).await?;
+        // Bind dual-stack so peers can reach us over IPv4 or IPv6. If the
+        // platform won't hand us a dual-stack socket, fall back to IPv4-only
+        // rather than failing to start.
+        let port = self.port_number.unwrap_or(0);
+        let tcp_listener = match bind_dual_stack(port) {
+            Ok(listener) => listener,
+            Err(e) => {
+                warn!("Dual-stack bind failed ({e}), falling back to IPv4-only");
+                TcpListener::bind(format!("0.0.0.0:{port}")).await?
+            }
+        };
         let binded_addr = tcp_listener.local_addr()?;
         info!("TcpListener on: {}", binded_addr);
 

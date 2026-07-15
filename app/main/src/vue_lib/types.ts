@@ -1,5 +1,6 @@
 import { State } from '@martichou/core_lib/bindings/State';
 import { DeviceType } from '@martichou/core_lib/bindings/DeviceType';
+import { TransferType } from '@martichou/core_lib/bindings/TransferType';
 import { Visibility } from '@martichou/core_lib/bindings/Visibility';
 
 export interface ToDelete {
@@ -14,6 +15,8 @@ export interface DisplayedItem {
 	endpoint: boolean,
 
 	state?: State,
+	// Direction of the transfer, so the UI can say "Sent" vs "Received".
+	transferType?: TransferType,
 	pin_code?: string,
 	files?: string[],
 	text_description?: string,

@@ -1,3 +1,5 @@
+use std::net::{IpAddr, SocketAddr};
+
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast::Sender;
@@ -9,6 +11,20 @@ use crate::channel::{ChannelDirection, ChannelMessage};
 use crate::errors::AppError;
 use crate::hdl::{InboundRequest, OutboundPayload, OutboundRequest, State};
 use crate::utils::RemoteDeviceInfo;
+
+/// A dual-stack listener reports IPv4 peers as IPv4-mapped IPv6 addresses
+/// (`::ffff:a.b.c.d`). Convert those back to plain IPv4 so connection ids and
+/// logs stay identical regardless of how the listener happened to bind. Real
+/// IPv6 peers pass through untouched.
+fn normalize_addr(addr: SocketAddr) -> SocketAddr {
+    match addr {
+        SocketAddr::V6(v6) => match v6.ip().to_ipv4_mapped() {
+            Some(v4) => SocketAddr::new(IpAddr::V4(v4), v6.port()),
+            None => addr,
+        },
+        SocketAddr::V4(_) => addr,
+    }
+}
 
 const INNER_NAME: &str = "TcpServer";
 
@@ -63,6 +79,7 @@ impl TcpServer {
                 r = self.tcp_listener.accept() => {
                     match r {
                         Ok((socket, remote_addr)) => {
+                            let remote_addr = normalize_addr(remote_addr);
                             trace!("{INNER_NAME}: new client: {remote_addr}");
                             let esender = self.sender.clone();
                             let csender = self.sender.clone();

@@ -62,15 +62,15 @@
 
 						<div v-else-if="item.state === 'Finished'">
 							<p class="mt-2">
-								Received <span v-if="item.text_type">text</span>
+								{{ item.transferType === 'Outbound' ? 'Sent' : 'Received' }} <span v-if="item.text_type">text</span>
 							</p>
 
 							<!-- If files -->
 							<p v-for="f in item.files ?? []" :key="f" class="overflow-hidden whitespace-nowrap text-ellipsis">
 								{{ f }}
 							</p>
-							<p v-if="item.files" class="mt-2 overflow-hidden whitespace-nowrap text-ellipsis">
-								<span v-if="item.files">Saved to </span>{{ item.destination }}
+							<p v-if="item.files && item.destination" class="mt-2 overflow-hidden whitespace-nowrap text-ellipsis">
+								Saved to {{ item.destination }}
 							</p>
 
 							<!-- If text -->

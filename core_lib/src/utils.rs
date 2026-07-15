@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::anyhow;
@@ -206,7 +206,7 @@ pub fn get_download_dir() -> PathBuf {
     Path::new("/").to_path_buf()
 }
 
-pub fn is_not_self_ip(ip_address: &Ipv4Addr) -> bool {
+pub fn is_not_self_ip(ip_address: &IpAddr) -> bool {
     if let Ok(if_addrs) = get_if_addrs() {
         for if_addr in if_addrs {
             if if_addr.ip() == *ip_address {
