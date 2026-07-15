@@ -6,7 +6,9 @@ import { ChannelMessage } from '@martichou/core_lib/bindings/ChannelMessage';
 import { ChannelAction } from '@martichou/core_lib';
 import { gt } from 'semver';
 
-function _displayedItems(vm: TauriVM): Array<DisplayedItem> {
+// Not `_`-prefixed: setup() exposes this on the component, and Vue reserves the
+// `_` and `$` prefixes for its internals (it warns and skips them).
+function computeDisplayedItems(vm: TauriVM): Array<DisplayedItem> {
 	const ndisplayed = new Array<DisplayedItem>();
 
 	vm.endpointsInfo.forEach((el) => {
@@ -213,7 +215,7 @@ async function getLatestVersion(vm: TauriVM) {
 
 // Default export
 export const utils = {
-	_displayedItems,
+	computeDisplayedItems,
 	setAutoStart,
 	applyAutoStart,
 	setRealClose,
