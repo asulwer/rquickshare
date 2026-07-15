@@ -226,6 +226,9 @@ export default {
 				// phone advertise itself to us even when it isn't set to
 				// "Everyone" visibility.
 				qrSvg: ref<string | undefined>(undefined),
+				// Guards against firing a second transfer: a resolved service is
+				// re-announced repeatedly.
+				qrAutoSent: ref<boolean>(false),
 
 			// eslint-disable-next-line no-undef
 			cleanupInterval: opt<NodeJS.Timeout>(),
@@ -314,7 +317,7 @@ export default {
 			);
 
 			this.unlisten.push(
-				await listen('rs2js_endpointinfo', (event) => {
+				await listen('rs2js_endpointinfo', async (event) => {
 					const ei = event.payload as EndpointInfo;
 					const idx = this.endpointsInfo.findIndex((el) => el.id === ei.id);
 
@@ -330,6 +333,15 @@ export default {
 						this.endpointsInfo.splice(idx, 1, ei);
 					} else {
 						this.endpointsInfo.push(ei);
+					}
+
+					// Scanning our QR is the user already choosing this device,
+					// so send straight away rather than making them pick it from
+					// the list.
+					if (ei.qr_match && this.outboundPayload !== undefined && !this.qrAutoSent) {
+						this.qrAutoSent = true;
+						this.qrSvg = undefined;
+						await this.sendInfo(this, ei.id);
 					}
 				})
 			);

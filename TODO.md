@@ -66,6 +66,18 @@ best available one. Goal: support them all.
 - [x] UI said "Received" for outbound transfers (and rendered a dangling "Saved
       to "): the transfer direction was never mapped into the frontend's
       `DisplayedItem`.
+- [x] **QR-code sharing — send to a phone that isn't set to "Everyone".**
+      Displaying a QR (our ECDSA public key inside a
+      `https://quickshare.google/qrcode#key=` URL) makes a phone that opens it
+      start advertising **even while hidden**: the scan *is* the authorization,
+      so no Google account and no certificates are involved. Both sides derive an
+      advertising token and a name-encryption key from the QR key material via
+      HKDF-SHA256; we recognise the scanner either by matching the token (visible
+      peer) or by AES-GCM-decrypting the name it advertised (hidden peer), then
+      auto-send to it. This required teaching the endpoint-info parser about the
+      visibility bit and TLV records, which it previously ignored entirely (it
+      stopped at the device name and errored on hidden peers). Verified end to
+      end against a hidden Pixel 10.
 
 ## Parked
 
@@ -74,9 +86,45 @@ best available one. Goal: support them all.
       needs a BLE **GATT server** (WinRT / bluer) to serve it, plus phase-2
       transfer work. Untestable on current hardware (Pixel 10 doesn't reproduce
       the AirDrop WiFi-drop). Parked with groundwork saved.
+- [ ] **Skip the receiver's accept prompt on a QR send.** The mechanism is
+      documented: put an ECDSA signature of the UKEY2 auth key (IEEE P1363
+      format, R||S, 64 bytes) into `qr_code_handshake_data` inside the
+      `PairedKeyEncryptionFrame`, signed with the QR's private key. Parked on
+      purpose — the cost/benefit is poor:
+      - The payoff is **one tap**, and it's arguably a tap worth keeping: it's
+        the receiver confirming what lands on their phone. The annoyance that
+        actually motivated this work (the "Everyone" toggle, which reverts every
+        10 minutes and broke outright on current Pixel firmware) is already
+        solved by QR sharing above.
+      - grishka's own note on it: *"TODO: figure out why this sometimes fails and
+        the prompt still appears"* — so the realistic outcome is "skips the tap
+        sometimes".
+      - The blast radius is disproportionate. It needs `qr_code_handshake_data`
+        added to `PairedKeyEncryptionFrame` (our `wire_format.proto` lacks it —
+        take the field number from Google's source rather than guessing: a wrong
+        number would silently corrupt a frame that works today), p256's `ecdsa`
+        feature, `QrSession` retaining its secret key, and — the real cost — QR
+        state threaded from *discovery* into the *outbound* path. `TcpServer` is
+        spawned in `run()` before any QR session exists, so this means a shared
+        `Arc<RwLock<Option<QrSession>>>` reaching code that carries **every**
+        transfer, to benefit only QR sends, and only sometimes.
+      Revisit only if the accept prompt turns out to be a real irritation in
+      daily use.
 
 ## Notes / ideas
 
+- **Contacts / "Your devices" visibility is not achievable for a third party** —
+  don't re-chase it. The phone identifies a contact by decrypting the 16 identity
+  bytes in our mDNS advertisement (2-byte salt + 14-byte encrypted metadata key,
+  which encodes an *account identifier*) against certificates it downloaded from
+  Google for that account. We advertise random bytes there — as NearDrop does —
+  which is precisely why only "Everyone" works, and why the paired-key frame we
+  send is random too. Obtaining real credentials means authenticating as the user
+  and registering a certificate with Google's **private** Nearby Sharing backend;
+  Chromium does exactly this, but with privileged OAuth scopes reserved for
+  Google's own clients. It's an access-control boundary by design (identity
+  verification is the whole point of contacts mode), not a hard problem to grind
+  through. QR sharing solves the real underlying need instead.
 - Upstream candidates to PR to Martichou/rquickshare: Windows support, the log
   fixes, send-text.
 - Autostart: build/install the release, then enable Start on boot + Keep running

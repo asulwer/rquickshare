@@ -36,6 +36,9 @@ pub struct EndpointInfo {
     pub port: Option<String>,
     pub rtype: Option<DeviceType>,
     pub present: Option<bool>,
+    /// Set when this peer was found by scanning our QR code. Scanning is itself
+    /// the user choosing us, so the sender connects without further prompting.
+    pub qr_match: Option<bool>,
 }
 
 pub struct MDnsDiscovery {
@@ -115,24 +118,24 @@ impl MDnsDiscovery {
                                         Err(_) => continue
                                     };
 
-                                    // A visible peer publishes its name. A hidden one is
-                                    // only reachable if it scanned our QR code - that's
-                                    // what identifies it and reveals its name.
-                                    let dn = match record.device_name.clone() {
-                                        Some(name) => name,
-                                        None => match self
-                                            .qr_session
-                                            .as_ref()
-                                            .and_then(|s| s.match_endpoint(&record))
-                                        {
-                                            Some(name) => {
-                                                info!("ServiceResolved: hidden peer scanned our QR code: {name:?}");
-                                                name
-                                            }
-                                            None => continue,
-                                        },
+                                    // A peer that scanned our QR is recognised whether it
+                                    // is visible or hidden; only a hidden one *depends*
+                                    // on it, since that's the sole way to name it.
+                                    let scanned = self
+                                        .qr_session
+                                        .as_ref()
+                                        .and_then(|s| s.match_endpoint(&record));
+
+                                    let dn = match (record.device_name.clone(), &scanned) {
+                                        (Some(name), _) => name,
+                                        (None, Some(name)) => {
+                                            info!("ServiceResolved: hidden peer scanned our QR code: {name:?}");
+                                            name.clone()
+                                        }
+                                        (None, None) => continue,
                                     };
                                     let dt = record.device_type.clone();
+                                    let qr_match = scanned.is_some();
 
                                     let fullname = info.get_fullname().to_string();
 
@@ -168,6 +171,7 @@ impl MDnsDiscovery {
                                             port: Some(port.to_string()),
                                             rtype: Some(dt.clone()),
                                             present: Some(true),
+                                            qr_match: Some(qr_match),
                                         };
                                         info!("ServiceResolved: Resolved a new service: {:?}", ei);
                                         cache.insert(fullname.clone(), ei.clone());
