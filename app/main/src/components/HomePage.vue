@@ -240,6 +240,7 @@ export default {
 			realclose: ref<boolean>(false),
 			startminimized: ref<boolean>(false),
 			clipboardAutosync: ref<boolean>(false),
+			debugLevel: ref<string>('info'),
 			lastClipboard: ref<string | undefined>(undefined),
 			visibility: ref<Visibility>('Visible'),
 			downloadPath: ref<string | undefined>(),
@@ -270,6 +271,7 @@ export default {
 				console.warn('[rqs] autostart unavailable (expected under `tauri dev`):', autostartErr);
 			}
 
+			await this.getLoggingLevel(this);
 			await this.getRealclose(this);
 			await this.getStartMinimized(this);
 			await this.getClipboardAutosync(this);

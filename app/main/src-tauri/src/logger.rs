@@ -58,7 +58,12 @@ pub fn set_up_logging(app_handle: &AppHandle) -> Result<(), anyhow::Error> {
                 message = message,
             ));
         })
-        .level(default_level)
+        // Let fern itself pass everything, and gate on the *global* max level
+        // (set below). That's the check the log macros make first, so it costs
+        // nothing while filtered - and unlike fern's own filter it can be
+        // changed at runtime, which is what lets the settings UI switch levels
+        // without a restart.
+        .level(log::LevelFilter::Trace)
         .level_for("mdns_sd", log::LevelFilter::Error)
         .level_for("polling", log::LevelFilter::Error)
         .level_for("neli", log::LevelFilter::Error)
@@ -81,6 +86,10 @@ pub fn set_up_logging(app_handle: &AppHandle) -> Result<(), anyhow::Error> {
     } else {
         dispatch.apply()?;
     }
+
+    // `apply()` raised the global max to match the dispatch (Trace); drop it to
+    // what was actually asked for. `change_logging_level` moves it later.
+    log::set_max_level(default_level);
 
     debug!("Finished setting up logging! yay!");
     Ok(())
