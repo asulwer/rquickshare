@@ -33,6 +33,8 @@ mod mdns;
 pub use mdns::*;
 mod outbound;
 pub use outbound::*;
+#[cfg(test)]
+mod tests;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, PartialEq)]
 #[ts(export)]

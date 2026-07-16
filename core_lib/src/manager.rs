@@ -94,6 +94,28 @@ impl TcpServer {
                                             Some(AppError::NotAnError) => break,
                                             None => {
                                                 if ir.state.state == State::Initial {
+                                                    // A peer that opens a connection and leaves
+                                                    // without speaking is a port scanner or a
+                                                    // stray connect, not a failed transfer. One
+                                                    // that sent something we couldn't handle is a
+                                                    // real protocol failure and must not be silent.
+                                                    let quiet = e
+                                                        .downcast_ref::<std::io::Error>()
+                                                        .is_some_and(|io| {
+                                                            matches!(
+                                                                io.kind(),
+                                                                std::io::ErrorKind::UnexpectedEof
+                                                                    | std::io::ErrorKind::ConnectionReset
+                                                                    | std::io::ErrorKind::ConnectionAborted
+                                                                    | std::io::ErrorKind::BrokenPipe
+                                                            )
+                                                        });
+
+                                                    if quiet {
+                                                        trace!("{INNER_NAME}: client left without speaking: {e}");
+                                                    } else {
+                                                        warn!("{INNER_NAME}: handshake failed on the first frame: {e}");
+                                                    }
                                                     break;
                                                 }
 

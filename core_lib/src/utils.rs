@@ -13,8 +13,7 @@ use p256::{PublicKey, SecretKey};
 use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
-use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use ts_rs::TS;
 
 use crate::CUSTOM_DOWNLOAD;
@@ -196,8 +195,8 @@ pub fn parse_endpoint_info_bytes(bytes: &[u8]) -> Result<EndpointInfoRecord, any
 }
 
 
-pub async fn stream_read_exact(
-    socket: &mut TcpStream,
+pub async fn stream_read_exact<S: AsyncRead + Unpin>(
+    socket: &mut S,
     buf: &mut [u8],
 ) -> Result<(), anyhow::Error> {
     match socket.read_exact(buf).await {
@@ -232,6 +231,50 @@ pub fn hkdf_extract_expand(
     hkdf.expand(info, &mut okm)
         .map_err(|e| anyhow!("HKDF expand failed: {}", e))?;
     Ok(okm)
+}
+
+/// The session keys derived from a completed UKEY2 exchange.
+///
+/// Both peers run the same ladder and arrive at the same four keys; only the
+/// roles differ. The receiver decrypts with the client key and encrypts with
+/// the server key; the sender does the opposite.
+pub struct D2DKeys {
+    pub auth_string: Vec<u8>,
+    pub client_key: Vec<u8>,
+    pub client_hmac_key: Vec<u8>,
+    pub server_key: Vec<u8>,
+    pub server_hmac_key: Vec<u8>,
+}
+
+/// Derive the D2D session keys from a completed UKEY2 exchange.
+///
+/// `derived_secret` is SHA-256 of the ECDH shared secret. `ukey_info` is the
+/// client init frame followed by the server init frame, byte for byte as they
+/// went over the wire.
+///
+/// Every label and salt here is fixed by the protocol: getting any of them
+/// wrong yields keys that decrypt nothing, with no clue as to which step
+/// drifted. The known-answer test in `hdl::tests` pins the whole ladder to a
+/// real Pixel session for exactly that reason.
+pub fn derive_d2d_keys(derived_secret: &[u8], ukey_info: &[u8]) -> Result<D2DKeys, anyhow::Error> {
+    let auth_string = hkdf_extract_expand(b"UKEY2 v1 auth", derived_secret, ukey_info, 32)?;
+    let next_secret = hkdf_extract_expand(b"UKEY2 v1 next", derived_secret, ukey_info, 32)?;
+
+    let salt = hex::decode("82AA55A0D397F88346CA1CEE8D3909B95F13FA7DEB1D4AB38376B8256DA85510")
+        .map_err(|e| anyhow!("Failed to decode salt_hex: {e}"))?;
+    let d2d_client = hkdf_extract_expand(&salt, &next_secret, b"client", 32)?;
+    let d2d_server = hkdf_extract_expand(&salt, &next_secret, b"server", 32)?;
+
+    let key_salt = hex::decode("BF9D2A53C63616D75DB0A7165B91C1EF73E537F2427405FA23610A4BE657642E")
+        .map_err(|e| anyhow!("Failed to decode key_salt_hex: {e}"))?;
+
+    Ok(D2DKeys {
+        auth_string,
+        client_key: hkdf_extract_expand(&key_salt, &d2d_client, b"ENC:2", 32)?,
+        client_hmac_key: hkdf_extract_expand(&key_salt, &d2d_client, b"SIG:1", 32)?,
+        server_key: hkdf_extract_expand(&key_salt, &d2d_server, b"ENC:2", 32)?,
+        server_hmac_key: hkdf_extract_expand(&key_salt, &d2d_server, b"SIG:1", 32)?,
+    })
 }
 
 pub fn to_four_digit_string(bytes: &Vec<u8>) -> String {
