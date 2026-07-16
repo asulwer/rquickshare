@@ -15,8 +15,7 @@ use prost::Message;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
-use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::broadcast::{Receiver, Sender};
 use ts_rs::TS;
 
@@ -44,8 +43,8 @@ use crate::sharing_nearby::{
     TextMetadata,
 };
 use crate::utils::{
-    encode_point, gen_ecdsa_keypair, gen_random, hkdf_extract_expand, stream_read_exact,
-    to_four_digit_string, DeviceType, RemoteDeviceInfo,
+    derive_d2d_keys, encode_point, gen_ecdsa_keypair, gen_random, stream_read_exact,
+    to_four_digit_string, D2DKeys, DeviceType, RemoteDeviceInfo,
 };
 use crate::{location_nearby_connections, sharing_nearby};
 
@@ -61,20 +60,23 @@ pub enum OutboundPayload {
     Text(String),
 }
 
+/// Generic over the transport so the handshake can be driven by a test over an
+/// in-memory duplex pair, not just a real socket. In production `S` is always
+/// `tokio::net::TcpStream`.
 #[derive(Debug)]
-pub struct OutboundRequest {
+pub struct OutboundRequest<S> {
     endpoint_id: [u8; 4],
-    socket: TcpStream,
+    socket: S,
     pub state: InnerState,
     sender: Sender<ChannelMessage>,
     receiver: Receiver<ChannelMessage>,
     payload: OutboundPayload,
 }
 
-impl OutboundRequest {
+impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
     pub fn new(
         endpoint_id: [u8; 4],
-        socket: TcpStream,
+        socket: S,
         id: String,
         sender: Sender<ChannelMessage>,
         payload: OutboundPayload,
@@ -1111,27 +1113,13 @@ impl OutboundRequest {
         ukey_info.extend_from_slice(self.state.client_init_msg_data.as_ref().unwrap());
         ukey_info.extend_from_slice(self.state.server_init_data.as_ref().unwrap());
 
-        let auth_label = "UKEY2 v1 auth".as_bytes();
-        let next_label = "UKEY2 v1 next".as_bytes();
-
-        let auth_string = hkdf_extract_expand(auth_label, &derived_secret, &ukey_info, 32)?;
-        let next_secret = hkdf_extract_expand(next_label, &derived_secret, &ukey_info, 32)?;
-
-        let salt_hex = "82AA55A0D397F88346CA1CEE8D3909B95F13FA7DEB1D4AB38376B8256DA85510";
-        let salt =
-            hex::decode(salt_hex).map_err(|e| anyhow!("Failed to decode salt_hex: {}", e))?;
-
-        let d2d_client = hkdf_extract_expand(&salt, &next_secret, "client".as_bytes(), 32)?;
-        let d2d_server = hkdf_extract_expand(&salt, &next_secret, "server".as_bytes(), 32)?;
-
-        let key_salt_hex = "BF9D2A53C63616D75DB0A7165B91C1EF73E537F2427405FA23610A4BE657642E";
-        let key_salt = hex::decode(key_salt_hex)
-            .map_err(|e| anyhow!("Failed to decode key_salt_hex: {}", e))?;
-
-        let client_key = hkdf_extract_expand(&key_salt, &d2d_client, "ENC:2".as_bytes(), 32)?;
-        let client_hmac_key = hkdf_extract_expand(&key_salt, &d2d_client, "SIG:1".as_bytes(), 32)?;
-        let server_key = hkdf_extract_expand(&key_salt, &d2d_server, "ENC:2".as_bytes(), 32)?;
-        let server_hmac_key = hkdf_extract_expand(&key_salt, &d2d_server, "SIG:1".as_bytes(), 32)?;
+        let D2DKeys {
+            auth_string,
+            client_key,
+            client_hmac_key,
+            server_key,
+            server_hmac_key,
+        } = derive_d2d_keys(&derived_secret, &ukey_info)?;
 
         self.update_state(
             |e| {
