@@ -65,12 +65,18 @@ pub fn set_up_logging(app_handle: &AppHandle) -> Result<(), anyhow::Error> {
         // without a restart.
         .level(log::LevelFilter::Trace)
         .level_for("mdns_sd", log::LevelFilter::Error)
+        // mdns-sd polls its sockets with `mio` as of upstream 0.13.0, which
+        // replaced `polling`. It logs a TRACE line per (re)registration, so at
+        // Trace it drowns the log - hundreds of lines between anything useful.
+        // The `polling` entry below is what used to cover this; it stayed while
+        // the crate underneath was swapped out, so keep both until `polling` is
+        // confirmed gone from the tree.
+        .level_for("mio", log::LevelFilter::Error)
         .level_for("polling", log::LevelFilter::Error)
         .level_for("neli", log::LevelFilter::Error)
         .level_for("bluez_async", log::LevelFilter::Error)
         .level_for("bluer", log::LevelFilter::Error)
         .level_for("async_io", log::LevelFilter::Error)
-        .level_for("polling", log::LevelFilter::Error)
         .level_for("btleplug", log::LevelFilter::Error)
         .chain(std::io::stdout());
 

@@ -39,17 +39,31 @@
 							<p class="mt-4">
 								Wants to share {{ item.files?.join(', ') ?? item.text_description ?? 'some file(s).' }}
 							</p>
-							<div class="flex flex-row justify-end gap-4 mt-1">
-								<p
-									@click.stop="sendCmd(vm, item.id, 'AcceptTransfer')" class="btn px-3
-									rounded-xl active:scale-95 transition duration-150 ease-in-out shadow-none">
-									Accept
-								</p>
-								<p
-									@click.stop="sendCmd(vm, item.id, 'RejectTransfer')" class="btn px-3
-									rounded-xl active:scale-95 transition duration-150 ease-in-out shadow-none">
-									Decline
-								</p>
+							<div class="flex flex-row justify-end items-center gap-4 mt-1">
+								<!-- Once answered, the buttons are replaced rather than just
+									 styled as disabled. A second click starts a second transfer
+									 setup, and the backend can sit on this state for several
+									 seconds, which is exactly when a click looks ignored. -->
+								<div v-if="responding.has(item.id)" class="flex flex-row items-center gap-2 px-3 py-2 opacity-70">
+									<span
+										class="w-4 h-4 rounded-full border-2 border-current border-t-transparent animate-spin"
+										aria-hidden="true"></span>
+									<p class="text-sm">
+										{{ responding.get(item.id) === 'AcceptTransfer' ? 'Accepting…' : 'Declining…' }}
+									</p>
+								</div>
+								<template v-else>
+									<p
+										@click.stop="respondToTransfer(item.id, 'AcceptTransfer')" class="btn px-3
+										rounded-xl active:scale-95 transition duration-150 ease-in-out shadow-none">
+										Accept
+									</p>
+									<p
+										@click.stop="respondToTransfer(item.id, 'RejectTransfer')" class="btn px-3
+										rounded-xl active:scale-95 transition duration-150 ease-in-out shadow-none">
+										Decline
+									</p>
+								</template>
 							</div>
 						</div>
 
@@ -169,6 +183,7 @@ import { open } from '@tauri-apps/plugin-shell';
 import { writeText, readText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { ChannelMessage } from '@martichou/core_lib/bindings/ChannelMessage';
+import { ChannelAction } from '@martichou/core_lib/bindings/ChannelAction';
 import { EndpointInfo } from '@martichou/core_lib/bindings/EndpointInfo';
 import { OutboundPayload } from '@martichou/core_lib/bindings/OutboundPayload';
 import { Visibility } from '@martichou/core_lib/bindings/Visibility';
@@ -229,6 +244,11 @@ export default {
 				// Guards against firing a second transfer: a resolved service is
 				// re-announced repeatedly.
 				qrAutoSent: ref<boolean>(false),
+
+			// Transfer id -> the action already sent for it. Guards against
+			// double-clicking Accept, which would otherwise run the whole
+			// transfer setup twice.
+			responding: ref<Map<string, ChannelAction>>(new Map()),
 
 			// eslint-disable-next-line no-undef
 			cleanupInterval: opt<NodeJS.Timeout>(),
@@ -291,6 +311,12 @@ export default {
 				await listen('rs2js_channelmessage', async (event) => {
 					const cm = event.payload as ChannelMessage;
 						const idx = this.requests.findIndex((el) => el.id === cm.id);
+
+					// The card has moved on (or died), so let the buttons work again
+					// if this id ever comes back for another transfer.
+					if (cm.state && cm.state !== "WaitingForUserConsent") {
+						this.responding.delete(cm.id);
+					}
 
 					if (cm.state === "Disconnected") {
 						this.toDelete.push({
@@ -461,6 +487,21 @@ export default {
 			} catch (e) {
 				this.toastStore.addToast("Unknown error while copying text", ToastType.Error);
 				console.error("Error copying text", e);
+			}
+		},
+		respondToTransfer: async function(id: string, action: ChannelAction) {
+			// The state only changes once the backend answers, so without this
+			// guard an impatient second click sends AcceptTransfer twice.
+			if (this.responding.has(id)) return;
+			this.responding.set(id, action);
+
+			try {
+				await this.sendCmd(this, id, action);
+			} catch (e) {
+				// Let them try again rather than stranding the card on a spinner.
+				this.responding.delete(id);
+				this.toastStore.addToast("Could not answer the transfer", ToastType.Error);
+				console.error("Error responding to transfer", e);
 			}
 		},
 		openUrl: async function(url: string) {

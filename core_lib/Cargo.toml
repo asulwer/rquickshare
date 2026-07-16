@@ -19,6 +19,10 @@ dbus = { version = "0.9", features = ["vendored"] }
 windows = { version = "0.58", features = [
     "Devices_Bluetooth_Advertisement",
     "Devices_WiFiDirect",
+    # WiFiDirectConnectionListener hands back a DeviceInformation for the peer;
+    # accepting the connection means resolving it by id.
+    "Devices_Enumeration",
+    "Networking",
     "Networking_Connectivity",
     "Networking_NetworkOperators",
     "Security_Credentials",
@@ -26,6 +30,11 @@ windows = { version = "0.58", features = [
     "Foundation",
     "Foundation_Collections",
     "Win32_System_Com",
+    # Read the WiFi Direct group owner's operating channel. WinRT's
+    # WiFiDirectAdvertisement exposes no channel/frequency, so drop to the Win32
+    # WLAN API (WlanEnumInterfaces + WlanQueryInterface) for it.
+    "Win32_NetworkManagement_WiFi",
+    "Win32_Foundation",
 ], optional = true }
 
 [dependencies]
@@ -43,7 +52,14 @@ hmac = "0.13"
 hostname = "0.4"
 libaes = "0.7"
 log = "0.4"
-mdns-sd = { git = "https://github.com/Martichou/mdns-sd", branch = "unsolicited" }
+# The published upstream crate, not Martichou's `unsolicited` fork. That fork
+# exists to expose `register_resend` (a forced re-announcement), but it is
+# pinned to a *branch* of a 0.10.4 snapshot from Feb 2024 whose maintainer is
+# inactive - so we were missing two years of DNS-parser hardening on untrusted
+# multicast input (name-compression loops, read_u16 length checks, RDATA
+# checks). Upstream documents `register()` as the way to re-announce, which
+# covers what we used `register_resend` for.
+mdns-sd = "0.20"
 mime_guess = "2.0"
 num-bigint = "0.4"
 once_cell = "1.20"

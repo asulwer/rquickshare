@@ -95,10 +95,15 @@ impl MDnsDiscovery {
                                     // first IPv4 one, so we can reach IPv6-only peers and
                                     // fall back when a multi-homed peer's first address
                                     // isn't reachable. "Self IPs" are filtered out.
+                                    // `ServiceResolved` now carries a `ResolvedService`
+                                    // rather than a `ServiceInfo`, and its addresses are
+                                    // `ScopedIp` (an IPv6 address plus the scope_id of the
+                                    // interface it was seen on) instead of bare `IpAddr`.
+                                    // We route by address alone, so flatten to `IpAddr`.
                                     let mut candidates: Vec<IpAddr> = info
                                         .get_addresses()
                                         .iter()
-                                        .copied()
+                                        .map(|ip| ip.to_ip_addr())
                                         .filter(|ip| !is_ipv6_link_local(ip))
                                         .collect();
                                     candidates.retain(is_not_self_ip);

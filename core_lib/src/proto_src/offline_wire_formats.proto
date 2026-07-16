@@ -136,6 +136,14 @@ message ConnectionResponseFrame {
   // for the bit usages.
   optional int32 multiplex_socket_bitmask = 5;
   optional int32 nearby_connections_version = 6;
+  optional int32 safe_to_disconnect_version = 7;
+  optional LocationHint location_hint = 8;
+  optional int32 keep_alive_timeout_millis = 9;
+  // The group owner announces its WiFi Direct device name here, up front, so
+  // the peer knows what to look for when it does Wi-Fi P2P device discovery
+  // later. Absent from grishka's PROTOCOL.md; required for the
+  // WIFI_DIRECT_WITH_DEVICE_NAME flow, which is the only one Windows can host.
+  optional string wifi_direct_device_name = 10;
 }
 
 message PayloadTransferFrame {
@@ -253,12 +261,30 @@ message BandwidthUpgradeNegotiationFrame {
     }
 
     // Accompanies Medium.WIFI_DIRECT.
+    //
+    // Fields 6-9 are absent from grishka's reverse-engineered PROTOCOL.md,
+    // which is where our copy came from - they postdate it. They are not
+    // optional trivia: see `WifiDirectAuthType` in MediumMetadata below.
+    // **Windows cannot host the ssid/password type at all**, so a Windows group
+    // owner must advertise `device_name` and let the peer find it by Wi-Fi P2P
+    // device discovery. Sending ssid/password from Windows - which is what we
+    // did all day 2026-07-16 - can never work.
     message WifiDirectCredentials {
       optional string ssid = 1;
       optional string password = 2;
       optional int32 port = 3;
       optional int32 frequency = 4;
       optional string gateway = 5 [default = "0.0.0.0"];
+      // IPv6 link-local address, network order (128bits).
+      // The GO should listen on both IPv4 and IPv6 addresses.
+      optional bytes ip_v6_address = 6;
+      // Windows and Android will use Wi-Fi P2P device discovery for WifiDirect.
+      // Its credentials is the device_name.
+      optional string service_name = 7 [deprecated = true];
+      // Not used for WIFI_DIRECT_WITH_DEVICE_NAME; reserved for future
+      // expansion. google's Windows GO sets it to "" (ConfirmOnly pairing).
+      optional string pin = 8;
+      optional string device_name = 9;
     }
 
     // Accompanies Medium.WEB_RTC
@@ -384,6 +410,19 @@ message BandwidthUpgradeRetryFrame {
 }
 
 message MediumMetadata {
+  // Should always match
+  // cs/symbol:location.nearby.proto.connections.WifiDirectAuthType
+  enum WifiDirectAuthType {
+    WIFI_DIRECT_TYPE_UNKNOWN = 0;
+    // WifiDirect type that uses ssid/password for authentication. Android
+    // supports this type, but Windows does not.
+    WIFI_DIRECT_WITH_PASSWORD = 1;
+    // WifiDirect type that uses device_name for discovery and connect.
+    // Android and Windows both support this type.
+    WIFI_DIRECT_WITH_PIN = 2 [deprecated = true];
+    WIFI_DIRECT_WITH_DEVICE_NAME = 3;
+  }
+
   // True if local device supports 5GHz.
   optional bool supports_5_ghz = 1;
   // WiFi LAN BSSID, in the form of a six-byte MAC address: XX:XX:XX:XX:XX:XX
@@ -408,6 +447,25 @@ message MediumMetadata {
   optional WifiAwareUsableChannels wifi_aware_usable_channels = 10;
   // Usable WiFi Hotspot STA channels on the local device.
   optional WifiHotspotStaUsableChannels wifi_hotspot_sta_usable_channels = 11;
+  // The supported medium roles.
+  optional MediumRole medium_role = 12;
+  // The supported WifiDirect auth types. The peer has been telling us this all
+  // along and we were not reading it - the Pixel advertises its set here, and a
+  // Windows GO must answer with WIFI_DIRECT_WITH_DEVICE_NAME only.
+  repeated WifiDirectAuthType supported_wifi_direct_auth_types = 13
+      [packed = true];
+}
+
+// The medium roles.
+message MediumRole {
+  optional bool support_wifi_direct_group_owner = 1;
+  optional bool support_wifi_direct_group_client = 2;
+  optional bool support_wifi_hotspot_host = 3;
+  optional bool support_wifi_hotspot_client = 4;
+  optional bool support_wifi_aware_publisher = 5;
+  optional bool support_wifi_aware_subscriber = 6;
+  optional bool support_awdl_publisher = 7;
+  optional bool support_awdl_subscriber = 8;
 }
 
 // Available channels on the local device.

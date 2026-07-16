@@ -24,11 +24,14 @@ pub use blea_win::*;
 #[cfg(all(feature = "experimental", target_os = "windows"))]
 mod blea_recv_win;
 mod ble_receiver;
-// Windows soft-AP for the WIFI_HOTSPOT bandwidth-upgrade medium.
+// Windows WiFi Direct group owner for the WIFI_DIRECT bandwidth-upgrade medium.
+// (A WIFI_HOTSPOT soft-AP lived here too; removed once google/nearby's source
+// showed a phone can never accept that upgrade from a WiFi-LAN connection. See
+// TODO.md — it's in git history if BLE ever makes it reachable.)
 #[cfg(all(feature = "experimental", target_os = "windows"))]
-mod hotspot_win;
+mod wifi_direct_win;
 #[cfg(all(feature = "experimental", target_os = "windows"))]
-pub use hotspot_win::*;
+pub use wifi_direct_win::*;
 mod inbound;
 pub use inbound::*;
 pub(crate) mod info;

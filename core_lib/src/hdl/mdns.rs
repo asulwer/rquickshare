@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use mdns_sd::{AddrType, ServiceDaemon, ServiceInfo};
+use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::Receiver;
 use tokio::sync::watch;
@@ -99,14 +99,18 @@ impl MDnsServer {
                     }
 
                     debug!("{INNER_NAME}: ble_receiver: got event");
-                    if visibility == Visibility::Visible || visibility == Visibility::Temporarily {
-                        // Android can sometime not see the mDNS service if the service
-                        // was running BEFORE Android started the Discovery phase for QuickShare.
-                        // So resend a broadcast if there's a android device sending.
-                        self.daemon.register_resend(self.service_info.get_fullname())?;
-                    } else {
-                        self.daemon.register(self.service_info.clone())?;
-                    }
+                    // Android can sometime not see the mDNS service if the service
+                    // was running BEFORE Android started the Discovery phase for QuickShare.
+                    // So resend a broadcast if there's a android device sending.
+                    //
+                    // This was `register_resend()`, which exists only on the fork and
+                    // is the sole reason we were pinned to it. Upstream documents the
+                    // replacement on `register`: "To re-announce a service with an
+                    // updated service_info, just call this register function again. No
+                    // need to call unregister first." `register_service` sends the
+                    // unsolicited response immediately, so this re-announces whether or
+                    // not we are already registered - collapsing both arms into one.
+                    self.daemon.register(self.service_info.clone())?;
                 },
                 _ = interval.tick() => {
                     if visibility != Visibility::Temporarily {
@@ -147,16 +151,38 @@ impl MDnsServer {
         info!("Broadcasting with: {hostname}");
         let endpoint_info = gen_mdns_endpoint_info(device_type as u8, &hostname);
 
+        // The mDNS host name must be fully qualified; the *display* name must not
+        // be. These were the same string until mdns-sd 0.11.0 made `register()`
+        // reject a hostname that doesn't end in ".local." - and since `register`
+        // is called with `?`, a bare "AaronPC" doesn't just fail to announce, it
+        // kills the whole MDnsServer task on the first visibility change. The
+        // 0.10.4 fork we came from predates that check, which is why this only
+        // broke on the upgrade.
+        let mdns_hostname = if hostname.ends_with(".local.") {
+            hostname.clone()
+        } else {
+            format!("{hostname}.local.")
+        };
+
         let properties = [("n", endpoint_info)];
-        let si = ServiceInfo::new(
+        let mut si = ServiceInfo::new(
             "_FC9F5ED42C8A._tcp.local.",
             &name,
-            &hostname,
+            &mdns_hostname,
             "",
             service_port,
             &properties[..],
         )?
-        .enable_addr_auto(AddrType::V4);
+        .enable_addr_auto();
+
+        // Was `enable_addr_auto(AddrType::V4)` on the fork. Upstream splits the
+        // two concerns: auto-fill addresses, and restrict which interfaces are
+        // considered. Per upstream's docs on `set_interfaces`: "When ips are
+        // auto-detected (via 'enable_addr_auto') only addresses on these
+        // interfaces will be considered." This is per-service, where the fork's
+        // enum was a global on the address type - so it's a strict improvement.
+        // IPv4-only is deliberate: see the parked IPv6 entry in TODO.md.
+        si.set_interfaces(vec![IfKind::IPv4]);
 
         Ok(si)
     }

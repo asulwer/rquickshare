@@ -159,14 +159,22 @@ impl RQS {
             send_channel.1,
         )?;
         let ctk = ctoken.clone();
-        tracker.spawn(async move { server.run(ctk).await });
+        tracker.spawn(async move {
+            if let Err(e) = server.run(ctk).await {
+                error!("TcpServer: stopped with an error: {e}");
+            }
+        });
 
         #[cfg(feature = "experimental")]
         {
             // Don't threat BleListener error as fatal, it's a nice to have.
             if let Ok(ble) = BleListener::new(self.ble_sender.clone()).await {
                 let ctk = ctoken.clone();
-                tracker.spawn(async move { ble.run(ctk).await });
+                tracker.spawn(async move {
+                    if let Err(e) = ble.run(ctk).await {
+                        error!("BleListener: stopped with an error: {e}");
+                    }
+                });
             }
         }
 
@@ -179,7 +187,17 @@ impl RQS {
             self.visibility_receiver.clone(),
         )?;
         let ctk = ctoken.clone();
-        tracker.spawn(async move { mdns.run(ctk).await });
+        // Log the outcome rather than dropping it. These `run` methods return
+        // Result and use `?` internally (e.g. `daemon.register(..)?`), so a
+        // single failure ends the task - and with the Result discarded, the
+        // service just silently stops existing. That is exactly how a bare
+        // hostname failing mdns-sd's `.local.` check looked: "service starting",
+        // "visibility changed: Visible", then nothing, forever, with no error.
+        tracker.spawn(async move {
+            if let Err(e) = mdns.run(ctk).await {
+                error!("MDnsServer: stopped with an error: {e}");
+            }
+        });
 
         // NOTE (issue #425): a BLE "receiver" advertiser is implemented in
         // hdl::BleReceiverAdvertiser (with the ble_receiver builders, see
@@ -250,7 +268,11 @@ impl RQS {
         if let Some(session) = qr_session {
             discovery = discovery.with_qr_session(session);
         }
-        tracker.spawn(async move { discovery.run(ctk.clone()).await });
+        tracker.spawn(async move {
+            if let Err(e) = discovery.run(ctk.clone()).await {
+                error!("MDnsDiscovery: stopped with an error: {e}");
+            }
+        });
 
         Ok(())
     }
