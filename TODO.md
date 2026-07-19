@@ -180,6 +180,101 @@ best available one. Goal: support them all.
       The phone attempts formation *before* discovery lands, fails, then finds
       us, retries, fails. `Intensive` did not close that gap.
 
+      ### UPDATE 2026-07-19 — early-start done, mechanism now understood
+
+      Group startup was split from the offer (`ensure_wifi_direct_group`, called
+      at `WaitingForUserConsent`; idempotent). Group now comes up ~1s before the
+      offer instead of at accept. Tested every combination:
+      legacy on/off × freq=5240 × early-start × full creds. **All fail identically.**
+
+      logcat pinned the mechanism. The phone does a **FAST P2P client join**
+      (`WifiP2pMetrics: startConnectionType:FAST, startGroupRole:CLIENT`,
+      `network key_mgmt 0x2` = WPA2-PSK). It **never associates**:
+      - `assoc key_mgmt 0x0` every attempt = supplicant selected no BSS.
+      - No `Trying to associate` / `Associated with` ever logged.
+      - `Nearby: Timed out waiting to connect to DIRECT-xxAARONPCxxxx` ×3, then
+        `WifiDirectBandwidthUpgradeMedium failed to connect to the WiFi Direct ssid`.
+      - **`ConnectionRequested` has never fired on our WinRT side** — the phone's
+        P2P formation frames aren't reaching our GO at all.
+
+      The phone finds us via P2P discovery (`P2P-DEVICE-FOUND name='AARONPC'`) as
+      **two entries**: the device addr `70:..:b7` with `group_capab=0x88` (no GO
+      bit) and the group BSSID `72:..:b6` with `group_capab=0x8b` (GO bit). But
+      discovery ≠ association: it never moves to the operating channel and joins.
+
+      **Leading hypothesis (a real wall, not a bug):** this phone's GMS (26.26.34)
+      only does the FAST PSK path, which needs a joinable P2P group whose
+      operating passphrase matches what we send. WinRT's autonomous GO exposes
+      only the *legacy* passphrase (`LegacySettings.Passphrase`), which is a
+      separate credential from the P2P group's, and it hosts joins via the
+      device-name/WPS path — the path this phone does **not** yet support ("in
+      the future" per the proto). Newer phones use device_name and would work;
+      this one can't take what WinRT can give.
+
+      ### RESOLVED 2026-07-19 — Google's own client does NOT upgrade here either
+
+      Ran official **Google Quick Share for Windows**, same Pixel, same network.
+      logcat, decisive line:
+      ```
+      NS_PAYLOAD BandWidthChanged(quality=3, connectionMedium=5,
+        localStaFrequency=5240, remoteStaFrequency=5240, instantConnectionResult=2)
+      ```
+      `connectionMedium=5` = WIFI_LAN, `quality=3` = HIGH. **Zero P2P activity in
+      the whole capture** — no p2p-wlan0, no P2P-GROUP, no formation attempt.
+      Google connected over WIFI_LAN and stayed there by design.
+
+      **Why: both devices are on the same WiFi (`localStaFrequency ==
+      remoteStaFrequency == 5240`).** When the two devices share a fast LAN,
+      Nearby does not upgrade to WiFi Direct — WIFI_LAN is already the
+      high-bandwidth path. WiFi Direct is for when there is NO shared network.
+
+      **So the entire WiFi Direct effort was tested in the one scenario where it
+      is neither needed nor attempted, by us or by Google.** Our transfers were
+      already running over WIFI_LAN the whole time. Not a bug in our GO code.
+
+      Consequences:
+      1. To actually exercise WiFi Direct (ours or Google's), the phone and PC
+         must be on **different** networks: phone on cellular with WiFi off, PC on
+         Ethernet, no common LAN. Only then is WIFI_LAN unavailable and WIFI_DIRECT
+         attempted. **Never tested — every run had both on homenet-u.**
+      2. Mirror Google: do not offer the WiFi Direct upgrade when both devices
+         share a fast LAN. Keeping it behind `RQS_TRY_WIFI_DIRECT_UPGRADE` was
+         right; a shipping build should gate on "no shared WIFI_LAN", not always.
+
+      The GO-bit / device-name / early-start work stands and is correct for the
+      off-LAN case; it just was never the thing blocking on-LAN transfers.
+
+      **CONFIRMED 2026-07-19: with the phone off-WiFi (cellular only), our PC does
+      not appear as a Quick Share target at all.** We advertise the receiver only
+      over mDNS (WIFI_LAN); the BLE advertiser makes us *visible* but we have no
+      BLE/Bluetooth *receiver* + initial connection channel (that's #425, which
+      needs a GATT server, not implemented). So off-LAN there is no bootstrap
+      channel over which a WiFi Direct upgrade could ever be negotiated.
+
+      ### BOTTOM LINE — WiFi Direct has no reachable+useful scenario today
+
+      - **Both devices share a LAN** (the normal case): Nearby uses WIFI_LAN and
+        does not upgrade — proven with Google's own client. WiFi Direct is neither
+        needed nor attempted. Transfers already work.
+      - **No shared LAN**: WiFi Direct would matter, but the phone can't even
+        discover us without a BLE/Bluetooth bootstrap we don't have.
+
+      **The prerequisite for off-LAN transfers (and thus for WiFi Direct to ever
+      run) is the #425 BLE receiver + initial Bluetooth channel, NOT more WiFi
+      Direct debugging.** The WiFi Direct GO code is correct groundwork; it stays
+      behind `RQS_TRY_WIFI_DIRECT_UPGRADE` until #425 provides a path that reaches
+      it. Roadmap reordered accordingly: #425 first.
+
+      ### (superseded) earlier "decisive next test" note
+
+      Install **official Google Quick Share for Windows**, send from the same
+      Pixel, and watch whether it achieves a WiFi Direct upgrade or also stays on
+      WiFi-LAN. This settles whether the goal is even reachable with this phone:
+      - Google's app also stays on WiFi-LAN → **true platform wall**, this phone
+        + a WinRT GO can't do WiFi Direct, and it is not our bug. Stop here.
+      - Google's app upgrades → capture ITS logcat (`P2P-*`, `assoc key_mgmt`) and
+        diff against ours; something specific is still wrong on our side.
+
       ### NEXT LEADS (untried)
 
       - **Start the group earlier.** We create it at accept time, ~1s before the

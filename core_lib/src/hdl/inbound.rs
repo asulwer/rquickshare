@@ -91,6 +91,10 @@ pub struct InboundRequest<S> {
     /// stayed on across restarts - don't repeat that.
     #[cfg(all(feature = "experimental", target_os = "windows"))]
     wifi_direct: Option<crate::hdl::WindowsWifiDirect>,
+    /// Credentials read off the group when it started, so the offer frame can be
+    /// built later. Set together with `wifi_direct`.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    wifi_direct_creds: Option<crate::hdl::WifiDirectCreds>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
@@ -111,6 +115,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
             receiver,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
             wifi_direct: None,
+            #[cfg(all(feature = "experimental", target_os = "windows"))]
+            wifi_direct_creds: None,
         }
     }
 
@@ -597,25 +603,25 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
     /// `bwu_manager.cc` rejects WIFI_HOTSPOT outright while WiFi-LAN is up ("this
     /// will destroy WIFI_LAN"), but only rejects WIFI_DIRECT when the *client* is
     /// Windows - and ours is the phone. See TODO.md.
+    /// Bring up the WiFi Direct group owner and start listening, *without*
+    /// sending the offer. Idempotent - a second call is a no-op.
+    ///
+    /// Split out from the offer so the group can be started early, at
+    /// `WaitingForUserConsent`, seconds before the phone is asked to join.
+    /// logcat showed the phone attempting P2P group formation *before* its
+    /// `P2P-DEVICE-FOUND` for us landed - i.e. we were structurally too late,
+    /// the group not yet discoverable when the peer first tried. google's
+    /// handler likewise starts the GO and begins accepting connections before it
+    /// builds the frame.
     #[cfg(all(feature = "experimental", target_os = "windows"))]
-    async fn offer_wifi_direct_upgrade(&mut self) -> Result<(), anyhow::Error> {
-        use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::{
-            upgrade_path_info::{Medium, WifiDirectCredentials},
-            EventType, UpgradePathInfo,
-        };
-        use crate::location_nearby_connections::BandwidthUpgradeNegotiationFrame;
-
+    async fn ensure_wifi_direct_group(&mut self) -> Result<(), anyhow::Error> {
         if self.wifi_direct.is_some() {
-            debug!("Bandwidth upgrade: WiFi Direct group already up, not starting a second");
+            debug!("Bandwidth upgrade: WiFi Direct group already up");
             return Ok(());
         }
 
         let port: u16 = 8899;
 
-        // Unlike the hotspot, Windows chooses the SSID/passphrase for a WiFi
-        // Direct legacy group (DIRECT-xxAARONPCxxxx), so we read them back rather
-        // than supplying them.
-        //
         // On a blocking thread: the WinRT calls take seconds, and stalling the
         // async executor breaks the in-flight handshake frames - that's what
         // caused the "Missing required fields (ReceivedPairedKeyResult)" failures
@@ -641,8 +647,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
             creds.device_name, creds.ssid, creds.gateway, port
         );
 
-        // Keep the group alive for the transfer; dropped with the request.
+        // Keep the group and its credentials alive for the transfer.
         self.wifi_direct = Some(handle);
+        self.wifi_direct_creds = Some(creds);
 
         // Wait for the phone to join the group and introduce itself. A join
         // arrives from the P2P subnet - anything from the LAN subnet (192.168.1.x)
@@ -665,6 +672,29 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
                 Err(e) => warn!("Bandwidth upgrade: bind failed: {e}"),
             }
         });
+
+        Ok(())
+    }
+
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    async fn offer_wifi_direct_upgrade(&mut self) -> Result<(), anyhow::Error> {
+        use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::{
+            upgrade_path_info::{Medium, WifiDirectCredentials},
+            EventType, UpgradePathInfo,
+        };
+        use crate::location_nearby_connections::BandwidthUpgradeNegotiationFrame;
+
+        // Start the group if it wasn't started early at WaitingForUserConsent.
+        self.ensure_wifi_direct_group().await?;
+
+        let port: u16 = 8899;
+        let creds = match &self.wifi_direct_creds {
+            Some(c) => c.clone(),
+            None => {
+                warn!("Bandwidth upgrade: no WiFi Direct credentials; group failed to start");
+                return Ok(());
+            }
+        };
 
         let frame = OfflineFrame {
             version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
@@ -1180,6 +1210,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
             false,
         )
         .await;
+
+        // Start the WiFi Direct group *now*, while the user is deciding, rather
+        // than at accept time. Bringing up the group owner takes a couple of
+        // seconds of WinRT work; starting it here gives it a head start so it's
+        // discoverable before the phone's first P2P formation attempt (which
+        // logcat showed racing ahead of discovery). The offer frame is still
+        // sent at accept time; ensure_wifi_direct_group() is idempotent.
+        #[cfg(all(feature = "experimental", target_os = "windows"))]
+        if std::env::var("RQS_TRY_WIFI_DIRECT_UPGRADE").is_ok() {
+            if let Err(e) = self.ensure_wifi_direct_group().await {
+                warn!("ensure_wifi_direct_group (early) failed: {e}");
+            }
+        }
 
         if !introduction.file_metadata.is_empty() && introduction.text_metadata.is_empty() {
             trace!("process_introduction: handling file_metadata");
