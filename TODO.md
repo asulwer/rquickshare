@@ -610,6 +610,86 @@ best available one. Goal: support them all.
       negotiation belongs, and it makes the WiFi upgrade the other half of #425
       rather than a separate feature.
 
+- [x] **Bandwidth upgrade to WIFI_HOTSPOT over the BLE channel: WORKING
+      (2026-07-20).** A file sent from a phone with WiFi **off** now arrives over
+      WiFi in ~11s instead of ~2min over BLE, with only ~3 KB ever crossing BLE.
+      Tethering is torn down with the transfer.
+
+      **The two things that were wrong, both about sequencing:**
+      1. **The phone never asks.** Our path was entirely reactive -
+         `send_supported_mediums` on BandwidthUpgradeRetry, the offer on
+         UPGRADE_PATH_REQUEST - and over BLE the phone sends *neither*, while
+         its own log spends 68s on `timeout when waiting for high-quality
+         medium`. Both sides waited for the other. UPGRADE_PATH_AVAILABLE is now
+         pushed unsolicited right after the user accepts, which is what
+         grishka's PROTOCOL.md describes ("after the transfer is accepted, the
+         server may ask the client for a bandwidth upgrade").
+      2. **Switching at CLIENT_INTRODUCTION_ACK is too early.** The client then
+         sends LAST_WRITE_TO_PRIOR_CHANNEL on the *old* channel and will not use
+         the new socket until it gets SAFE_TO_CLOSE_PRIOR_CHANNEL back. Tearing
+         the BLE bridge down at the ACK left that frame arriving at nothing and
+         the phone cancelled the transfer. The socket is now held from the ACK
+         until SAFE_TO_CLOSE has gone out over BLE.
+
+      **Why the swap is small:** TCP framing is byte-for-byte what
+      `InboundRequest` already reads off the BLE bridge's duplex - only the
+      Weave and multiplex wrappers were ever BLE-specific. So the pump just
+      `copy_bidirectional`s the new socket into the duplex and the encrypted
+      stream (keys, sequence numbers) carries straight over. `InboundRequest`
+      needed no changes.
+
+      **Why hotspot and not WiFi Direct:** Windows can only host
+      `WIFI_DIRECT_WITH_DEVICE_NAME`, needing Wi-Fi P2P device discovery — the
+      2026-07-16 dead end. A soft-AP is ssid/password/gateway/port the phone
+      joins as an ordinary client. `hotspot_win.rs` was restored from `908ab5b^`,
+      where it had been removed with the note "it's in git history if BLE ever
+      makes it reachable"; BLE made it reachable, because with the phone's WiFi
+      off its ConnectionRequest omits WIFI_LAN and the "this will destroy
+      WIFI_LAN" objection no longer applies. WiFi Direct remains behind
+      `RQS_TRY_WIFI_DIRECT_UPGRADE=1`.
+
+      **`NetworkOperatorTetheringManager` is not agile.** Unlike the WiFi Direct
+      types it is apartment-threaded, so holding one in `InboundRequest` made
+      that struct neither `Send` nor `Sync` and broke every `tokio::spawn`
+      carrying one — including the plain TCP path. It lives on its own thread;
+      only a stop signal crosses. Do not "fix" this with `unsafe impl Send`.
+
+      **Why hotspot, having previously deleted it.** It was removed in `908ab5b`
+      because google/nearby's `bwu_manager.cc` rejects WIFI_HOTSPOT while
+      WIFI_LAN is up ("this will destroy WIFI_LAN"), with the note *"it's in git
+      history if BLE ever makes it reachable"*. BLE made it reachable: over the
+      BLE socket the phone's WiFi is off, so its ConnectionRequest **omits
+      WIFI_LAN entirely** and lists `[WIFI_DIRECT, WIFI_AWARE, WIFI_HOTSPOT,
+      WEB_RTC, BLE_L2CAP, BLUETOOTH, BLE, NFC]`. The condition that removed
+      hotspot no longer holds. `hotspot_win.rs` restored verbatim from
+      `908ab5b^`.
+
+      Hotspot over WiFi Direct because Windows can only host
+      `WIFI_DIRECT_WITH_DEVICE_NAME` (needs Wi-Fi P2P device discovery, and the
+      phone's GMS wants ssid/password it cannot get) — that is the 2026-07-16
+      dead end. A soft-AP is ssid/password/gateway/port that the phone joins as
+      an ordinary client. The old path is still there behind
+      `RQS_TRY_WIFI_DIRECT_UPGRADE=1`.
+
+      **Wired so far:** `send_supported_mediums` now claims
+      `[WIFI_HOTSPOT, WIFI_DIRECT]` (it previously claimed WIFI_LAN, useless to
+      a peer with no WiFi up, and a medium whose code had been deleted);
+      `ensure_hotspot()` starts the soft-AP on a blocking thread and begins
+      accepting on 8899 *before* the offer goes out; `offer_wifi_hotspot_upgrade()`
+      sends UPGRADE_PATH_AVAILABLE with the credentials. The existing
+      `introduce_upgraded_channel` (CLIENT_INTRODUCTION/ACK, #27) is reused
+      unchanged. `WindowsHotspot` now has a `Drop` that stops tethering, so the
+      radio isn't left in AP mode.
+
+      **Still to do:** swap the encrypted stream onto the accepted socket (#28) —
+      today `introduce_upgraded_channel` completes the introduction and the
+      transfer stays on BLE, so this will not be faster until that lands.
+
+      **Watch for on first run:** starting tethering drives the *same radio*
+      into soft-AP mode, and "something turns WiFi off when I send" has bitten
+      this repo before. If the PC's own WiFi drops when the offer goes out, that
+      is this, not a regression elsewhere.
+
       **PHASE 2 (transfer over BLE) - socket is OPEN, data is flowing
       (2026-07-20).** With WiFi off the phone now connects and streams the real
       Nearby protocol to us. What it took:

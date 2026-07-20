@@ -32,10 +32,17 @@ pub use blea_recv_win::*;
 // dead code on other targets - no blanket `allow(dead_code)` needed.
 #[cfg(all(feature = "experimental", target_os = "windows"))]
 mod ble_receiver;
+// Windows soft-AP for the WIFI_HOTSPOT bandwidth-upgrade medium. Removed in
+// 908ab5b because a phone can never accept that upgrade from a WiFi-LAN
+// connection - with the note "it's in git history if BLE ever makes it
+// reachable". BLE did: over the BLE socket the phone's ConnectionRequest omits
+// WIFI_LAN entirely (its WiFi is off) and advertises WIFI_HOTSPOT, so the
+// objection that removed this no longer applies. Restored verbatim.
+#[cfg(all(feature = "experimental", target_os = "windows"))]
+mod hotspot_win;
+#[cfg(all(feature = "experimental", target_os = "windows"))]
+pub use hotspot_win::*;
 // Windows WiFi Direct group owner for the WIFI_DIRECT bandwidth-upgrade medium.
-// (A WIFI_HOTSPOT soft-AP lived here too; removed once google/nearby's source
-// showed a phone can never accept that upgrade from a WiFi-LAN connection. See
-// TODO.md — it's in git history if BLE ever makes it reachable.)
 #[cfg(all(feature = "experimental", target_os = "windows"))]
 mod wifi_direct_win;
 #[cfg(all(feature = "experimental", target_os = "windows"))]

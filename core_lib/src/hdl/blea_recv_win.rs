@@ -120,10 +120,31 @@ impl BleReceiverAdvertiser {
         let handler_calls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
         let pump_us = handler_us.clone();
         let pump_calls = handler_calls.clone();
+
+        // Signals that the phone tore the BLE link down. Without it the pump
+        // sits waiting for bytes that can never arrive, `InboundRequest` never
+        // returns, and the UI shows a transfer stuck at whatever percentage it
+        // reached - which is exactly what a dropped link looked like from the
+        // app: the phone says "sent", we say nothing at all.
+        let (down_tx, mut down_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        // Carries the upgraded WiFi socket from the bandwidth-upgrade listener
+        // back to the pump, which then splices it in place of the Weave
+        // transport. TCP framing is byte-for-byte what `InboundRequest` already
+        // reads off the duplex, so the swap needs no translation and the
+        // encrypted stream - keys, sequence numbers - continues untouched.
+        let (upgrade_tx, mut upgrade_rx) =
+            tokio::sync::mpsc::unbounded_channel::<tokio::net::TcpStream>();
+        // Separate from the socket itself: the socket arrives at
+        // CLIENT_INTRODUCTION_ACK, but the stream may not move until
+        // SAFE_TO_CLOSE_PRIOR_CHANNEL has gone out over BLE.
+        let (switch_tx, mut switch_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+
         let msg_sender = self.sender.clone();
+        let ui_sender = self.sender.clone();
         tokio::spawn(async move {
             let mut request =
                 super::InboundRequest::new(theirs, "ble".to_string(), msg_sender);
+            request.set_upgrade_sink(upgrade_tx, switch_tx);
 
             // `handle()` services exactly **one** frame and returns; the caller
             // owns the loop (see TcpServer). Calling it once ends the task after
@@ -137,7 +158,27 @@ impl BleReceiverAdvertiser {
                             Some(crate::errors::AppError::NotAnError) => {
                                 info!("{INNER_NAME}: BLE session closed normally");
                             }
-                            _ => warn!("{INNER_NAME}: BLE InboundRequest ended: {e}"),
+                            // Report the state machine's position too: the same
+                            // error text means different things at different
+                            // points in the handshake.
+                            _ => {
+                                warn!(
+                                    "{INNER_NAME}: BLE InboundRequest ended in state {:?}: {e}",
+                                    request.state.state
+                                );
+                                // Tell the UI. The TCP path does this in
+                                // manager.rs; without it a failed BLE transfer
+                                // leaves its card frozen mid-progress forever,
+                                // which reads as a hang rather than a failure.
+                                if request.state.state != crate::hdl::State::Finished {
+                                    let _ = ui_sender.send(crate::channel::ChannelMessage {
+                                        id: "ble".to_string(),
+                                        direction: crate::channel::ChannelDirection::LibToFront,
+                                        state: Some(crate::hdl::State::Disconnected),
+                                        ..Default::default()
+                                    });
+                                }
+                            }
                         }
                         break;
                     }
@@ -156,6 +197,8 @@ impl BleReceiverAdvertiser {
             let mut rx_frames: u64 = 0;
             let mut win_bytes: u64 = 0;
             let mut last_report = std::time::Instant::now();
+            // Held between CLIENT_INTRODUCTION_ACK and SAFE_TO_CLOSE_PRIOR_CHANNEL.
+            let mut upgraded: Option<tokio::net::TcpStream> = None;
             loop {
                 tokio::select! {
                     Some(msg) = inbound_rx.recv() => {
@@ -241,6 +284,63 @@ impl BleReceiverAdvertiser {
                                 }
                             }
                         }
+                    }
+                    Some(sock) = upgrade_rx.recv() => {
+                        // Arrives at CLIENT_INTRODUCTION_ACK. Hold it: the phone
+                        // still has LAST_WRITE_TO_PRIOR_CHANNEL to send over BLE
+                        // and waits for our SAFE_TO_CLOSE_PRIOR_CHANNEL before
+                        // it will use this socket. Switching here tore the BLE
+                        // bridge down under that exchange and the phone
+                        // cancelled the transfer.
+                        info!("{INNER_NAME}: upgraded socket ready, holding for SAFE_TO_CLOSE");
+                        upgraded = Some(sock);
+                    }
+                    Some(_) = switch_rx.recv() => {
+                        // SAFE_TO_CLOSE_PRIOR_CHANNEL has gone out; the old
+                        // channel is finished with.
+                        match upgraded.take() {
+                            Some(mut sock) => {
+                                // Splice rather than translate: what the phone
+                                // writes here is already [u32 len][frame],
+                                // exactly what the far side of the duplex reads.
+                                // Only the Weave and multiplex wrappers were ever
+                                // BLE-specific, so the encrypted stream - keys,
+                                // sequence numbers - carries straight over.
+                                info!(
+                                    "{INNER_NAME}: switching the stream onto the upgraded socket"
+                                );
+                                match tokio::io::copy_bidirectional(&mut sock, &mut ours).await {
+                                    Ok((from_phone, to_phone)) => info!(
+                                        "{INNER_NAME}: upgraded socket closed ({from_phone} B in, \
+                                         {to_phone} B out)"
+                                    ),
+                                    // The phone slams the socket shut the
+                                    // moment the transfer completes rather than
+                                    // closing it cleanly, so a reset here is the
+                                    // normal ending, not a fault.
+                                    Err(e)
+                                        if matches!(
+                                            e.kind(),
+                                            std::io::ErrorKind::ConnectionReset
+                                                | std::io::ErrorKind::ConnectionAborted
+                                        ) =>
+                                    {
+                                        info!(
+                                            "{INNER_NAME}: phone closed the upgraded socket ({e})"
+                                        );
+                                    }
+                                    Err(e) => warn!("{INNER_NAME}: upgraded socket failed: {e}"),
+                                }
+                                break;
+                            }
+                            None => warn!(
+                                "{INNER_NAME}: asked to switch but no upgraded socket arrived"
+                            ),
+                        }
+                    }
+                    _ = down_rx.recv() => {
+                        warn!("{INNER_NAME}: BLE link dropped, tearing the bridge down");
+                        break;
                     }
                     else => break,
                 }
@@ -351,6 +451,9 @@ impl BleReceiverAdvertiser {
                     let n = s.SubscribedClients().and_then(|c| c.Size()).unwrap_or(0);
                     if n == 0 {
                         warn!("{INNER_NAME}: phone unsubscribed - BLE link dropped");
+                        // Unblock the bridge so the transfer fails visibly
+                        // instead of hanging.
+                        let _ = down_tx.send(());
                     } else {
                         info!("{INNER_NAME}: server-tx subscribers = {n}");
                     }
@@ -689,6 +792,22 @@ impl BleReceiverAdvertiser {
                     frame_weave(&msg, &mut tx_queue);
                 }
 
+                // Deliberately no queue cap here. `frame_weave` assigns the
+                // Weave counter when it queues a packet, so dropping a queued
+                // one leaves a gap in our outbound sequence - and the phone
+                // validates that sequence (it answered an earlier counter bug
+                // with Weave Error 0x92). Trading a timeout for a protocol
+                // violation is not a fix. The rate of keepalive responses is
+                // limited at the source instead, in inbound.rs, where we
+                // actually know which frames are redundant.
+                if tx_queue.len() > 4 {
+                    warn!(
+                        "{INNER_NAME}: outbound backing up - {} packets queued; the link is not \
+                         draining our indications",
+                        tx_queue.len()
+                    );
+                }
+
                 // At most one indication outstanding. The completion handler
                 // clears the flag, so the next goes out only once the phone has
                 // confirmed the previous one.
@@ -726,7 +845,7 @@ impl BleReceiverAdvertiser {
                                                 warn!(
                                                     "{INNER_NAME}: indication ctr={ctr} confirmed \
                                                      after {ms} ms, statuses {statuses:?} \
-                                                     (0 = Success)"
+                                                     (0 = Success), {queued} still queued"
                                                 );
                                             } else {
                                                 debug!(
