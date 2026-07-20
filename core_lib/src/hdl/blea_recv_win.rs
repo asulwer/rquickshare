@@ -110,6 +110,16 @@ impl BleReceiverAdvertiser {
             tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
         let (mut ours, theirs) = tokio::io::duplex(256 * 1024);
+
+        // Time spent *inside* the WinRT write callback, accumulated rather than
+        // logged per packet. This is the measurement that decides whether the
+        // ~25 ms/packet we observe is our own processing (ours to fix) or the
+        // connection interval (the central's choice, not exposed to a WinRT
+        // GATT server). Two atomics cost nothing next to a 509-byte BLE write.
+        let handler_us = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let handler_calls = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let pump_us = handler_us.clone();
+        let pump_calls = handler_calls.clone();
         let msg_sender = self.sender.clone();
         tokio::spawn(async move {
             let mut request =
@@ -180,9 +190,20 @@ impl BleReceiverAdvertiser {
                             win_bytes += body.len() as u64;
                             let elapsed = last_report.elapsed();
                             if elapsed >= std::time::Duration::from_secs(5) {
+                                use std::sync::atomic::Ordering::Relaxed;
+                                let calls = pump_calls.swap(0, Relaxed);
+                                let us = pump_us.swap(0, Relaxed);
+                                // `in handler` is the share of wall-clock time we
+                                // actually spend processing a write. If it is a
+                                // few percent, the gap between packets is the
+                                // link (connection interval) and no amount of
+                                // optimising our code will help.
+                                let mean_us = if calls > 0 { us / calls } else { 0 };
+                                let busy = us as f64 / elapsed.as_micros() as f64 * 100.0;
                                 info!(
                                     "{INNER_NAME}: BLE rx {:.1} KB/s ({rx_frames} frames, \
-                                     {:.0} KB total)",
+                                     {:.0} KB total) - handler {mean_us} us mean over \
+                                     {calls} writes, {busy:.1}% busy",
                                     win_bytes as f64 / 1024.0 / elapsed.as_secs_f64(),
                                     rx_bytes as f64 / 1024.0,
                                 );
@@ -300,6 +321,15 @@ impl BleReceiverAdvertiser {
             // return an empty result list - delivered to nobody - even with
             // SubscribedClients() == 1, i.e. the phone had subscribed for
             // indications and there was no matching subscriber to notify.
+            // Notify *and* Indicate, and the Indicate is not optional.
+            //
+            // Tried and measured (2026-07-20): declaring Notify alone gives
+            // `SubscribedClients() == 1` but `delivery statuses []` - the phone
+            // subscribes for indications only, so notifications reach nobody. It
+            // then answers with a Weave Error (0x92) and reconnects in a loop,
+            // and the accept prompt never appears. So the ATT-confirmation
+            // timeout that indications carry cannot be dodged this way; it has
+            // to be lived with. Do not "simplify" this to Notify.
             stx_params.SetCharacteristicProperties(
                 GattCharacteristicProperties::Notify | GattCharacteristicProperties::Indicate,
             )?;
@@ -386,6 +416,7 @@ impl BleReceiverAdvertiser {
                 let Some(args) = args.as_ref() else {
                     return Ok(());
                 };
+                let t_enter = std::time::Instant::now();
                 let deferral = args.GetDeferral()?;
                 let request = args.GetRequestAsync()?.get()?;
                 let reader = DataReader::FromBuffer(&request.Value()?)?;
@@ -442,6 +473,27 @@ impl BleReceiverAdvertiser {
                             let ctr = (header >> 4) & 0x07;
                             let first = header & 0x08 != 0;
                             let last = header & 0x04 != 0;
+                            // Two sanity checks on reassembly. Both are silent
+                            // in normal operation and both would have named the
+                            // out-of-order bug immediately instead of surfacing
+                            // as a D2D sequence-number error several frames
+                            // later. An intermittent "Missing required fields"
+                            // during the handshake is exactly what a stale or
+                            // misordered packet spliced into a message looks
+                            // like, so make that visible rather than inferred.
+                            if first && !st.acc.is_empty() {
+                                warn!(
+                                    "{INNER_NAME}: REASSEMBLY - new message (ctr={ctr}) starts \
+                                     with {} B still accumulated; previous message lost its tail",
+                                    st.acc.len()
+                                );
+                            }
+                            if !first && st.acc.is_empty() {
+                                warn!(
+                                    "{INNER_NAME}: REASSEMBLY - continuation packet (ctr={ctr}, \
+                                     last={last}) with nothing accumulated; its head is missing"
+                                );
+                            }
                             if first {
                                 st.acc.clear();
                             }
@@ -576,6 +628,11 @@ impl BleReceiverAdvertiser {
                         Err(e) => warn!("{INNER_NAME}: NotifyValueAsync failed: {e}"),
                     }
                 }
+                handler_us.fetch_add(
+                    t_enter.elapsed().as_micros() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                handler_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 Ok(())
             }))?;
 
@@ -585,10 +642,20 @@ impl BleReceiverAdvertiser {
                 advertisement.len()
             );
 
-            // Outbound Weave: take whole [hash][len][frame] messages from the
-            // bridge, split into (packet_size - 1) chunks and notify each with
-            // header (counter<<4) | (first<<3) | (last<<2).
-            let send_weave = |bytes: &[u8]| -> Result<(), anyhow::Error> {
+            // Outbound Weave: split whole [hash][len][frame] messages from the
+            // bridge into (packet_size - 1) chunks with header
+            // (counter<<4) | (first<<3) | (last<<2), and *queue* them.
+            //
+            // Queueing rather than firing immediately is the point. Every one of
+            // these is an indication, and an indication unconfirmed for 30 s
+            // obliges the stack to drop the ACL. Under inbound congestion
+            // confirmations were taking 8-10 s each, so firing them all left a
+            // growing backlog whose oldest entry eventually crossed 30 s:
+            // measured `ctr=5 confirmed after 37175 ms, statuses [1]` followed
+            // immediately by the link dropping. With one in flight, the ATT
+            // timer only ever sees a single confirmation latency; the rest wait
+            // in our queue where no timer is running.
+            let frame_weave = |bytes: &[u8], out: &mut std::collections::VecDeque<Vec<u8>>| {
                 let max_payload = 508usize; // negotiated 509 minus the header byte
                 let chunks: Vec<&[u8]> = bytes.chunks(max_payload).collect();
                 let n = chunks.len();
@@ -603,24 +670,85 @@ impl BleReceiverAdvertiser {
                     let mut pkt = Vec::with_capacity(1 + chunk.len());
                     pkt.push(header);
                     pkt.extend_from_slice(chunk);
-
-                    let w = DataWriter::new()?;
-                    w.WriteBytes(&pkt)?;
-                    let _ = server_tx.NotifyValueAsync(&w.DetachBuffer()?);
+                    out.push_back(pkt);
                 }
-                info!(
-                    "{INNER_NAME}: weave sent {} B in {n} packet(s), next ctr={}",
+                debug!(
+                    "{INNER_NAME}: weave queued {} B as {n} packet(s), next ctr={}",
                     bytes.len(),
                     tx_counter.load(std::sync::atomic::Ordering::Relaxed) & 0x07
                 );
-                Ok(())
             };
+
+            let mut tx_queue: std::collections::VecDeque<Vec<u8>> =
+                std::collections::VecDeque::new();
+            let in_flight = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
             let mut last_status: i32 = -1;
             while !ctk.is_cancelled() {
                 while let Ok(msg) = outbound_rx.try_recv() {
-                    if let Err(e) = send_weave(&msg) {
-                        warn!("{INNER_NAME}: weave send failed: {e}");
+                    frame_weave(&msg, &mut tx_queue);
+                }
+
+                // At most one indication outstanding. The completion handler
+                // clears the flag, so the next goes out only once the phone has
+                // confirmed the previous one.
+                if !in_flight.load(std::sync::atomic::Ordering::Relaxed) {
+                    if let Some(pkt) = tx_queue.pop_front() {
+                        let ctr = (pkt[0] >> 4) & 0x07;
+                        let queued = tx_queue.len();
+                        let send = || -> Result<(), anyhow::Error> {
+                            let w = DataWriter::new()?;
+                            w.WriteBytes(&pkt)?;
+                            match server_tx.NotifyValueAsync(&w.DetachBuffer()?) {
+                                Ok(op) => {
+                                    in_flight
+                                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                                    let flag = in_flight.clone();
+                                    let op_for_log = op.clone();
+                                    let sent_at = std::time::Instant::now();
+                                    let _ = op.SetCompleted(
+                                        &AsyncOperationCompletedHandler::new(move |_, _| {
+                                            let mut statuses = Vec::new();
+                                            if let Ok(results) = op_for_log.GetResults() {
+                                                for i in 0..results.Size().unwrap_or(0) {
+                                                    if let Ok(r) = results.GetAt(i) {
+                                                        statuses.push(
+                                                            r.Status().map(|s| s.0).unwrap_or(-1),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            let ms = sent_at.elapsed().as_millis();
+                                            // 30 s is the ATT timeout; anything
+                                            // approaching it means the link is
+                                            // about to be dropped under us.
+                                            if statuses.iter().any(|s| *s != 0) || ms > 10_000 {
+                                                warn!(
+                                                    "{INNER_NAME}: indication ctr={ctr} confirmed \
+                                                     after {ms} ms, statuses {statuses:?} \
+                                                     (0 = Success)"
+                                                );
+                                            } else {
+                                                debug!(
+                                                    "{INNER_NAME}: indication ctr={ctr} confirmed \
+                                                     in {ms} ms ({queued} queued)"
+                                                );
+                                            }
+                                            flag.store(
+                                                false,
+                                                std::sync::atomic::Ordering::Relaxed,
+                                            );
+                                            Ok(())
+                                        }),
+                                    );
+                                }
+                                Err(e) => warn!("{INNER_NAME}: NotifyValueAsync failed: {e}"),
+                            }
+                            Ok(())
+                        };
+                        if let Err(e) = send() {
+                            warn!("{INNER_NAME}: weave send failed: {e}");
+                        }
                     }
                 }
                 if let Ok(status) = provider.AdvertisementStatus() {
@@ -633,7 +761,10 @@ impl BleReceiverAdvertiser {
                         );
                     }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(250));
+                // 50ms, not 250ms: this loop now also paces outbound
+                // indications, and at 250ms the handshake burst (~8 frames)
+                // would take two seconds to get out.
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
 
             info!("{INNER_NAME}: tracker cancelled, stopping advertiser");

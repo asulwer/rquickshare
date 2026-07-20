@@ -27,6 +27,15 @@
     "clipboard-manager:allow-read-text",
     "clipboard-manager:allow-write-text",
     "shell:allow-open",
+    "opener:allow-open-url",
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [{ "path": "**" }]
+    },
+    {
+      "identifier": "opener:allow-reveal-item-in-dir",
+      "allow": [{ "path": "**" }]
+    },
     "store:default"
   ]
 }

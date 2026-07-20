@@ -107,7 +107,7 @@
 							<div class="flex flex-row justify-end gap-4 mt-1">
 								<p
 									v-if="item.destination || (item.text_type === 'Url' && item.text_payload)"
-									@click.stop="openUrl(item.destination ?? item.text_payload!)"
+									@click.stop="openTransfer(item)"
 									class="btn px-3 rounded-xl active:scale-95 transition duration-150 ease-in-out shadow-none">
 									Open
 								</p>
@@ -179,7 +179,8 @@ import { getStore } from "@tauri-apps/plugin-store";
 import { isPermissionGranted, requestPermission } from '@tauri-apps/plugin-notification';
 import { disable, enable } from '@tauri-apps/plugin-autostart';
 import { open as tauriDialog } from '@tauri-apps/plugin-dialog';
-import { open } from '@tauri-apps/plugin-shell';
+import { openUrl as openExternalUrl, openPath } from '@tauri-apps/plugin-opener';
+import { join } from '@tauri-apps/api/path';
 import { writeText, readText } from '@tauri-apps/plugin-clipboard-manager';
 
 import { ChannelMessage } from '@martichou/core_lib/bindings/ChannelMessage';
@@ -504,12 +505,38 @@ export default {
 				console.error("Error responding to transfer", e);
 			}
 		},
+		// Web links only. `destination` is a filesystem path and must not come
+		// through here - see openTransfer.
 		openUrl: async function(url: string) {
 			try {
-				await open(url);
+				await openExternalUrl(url);
 			} catch (e) {
 				this.toastStore.addToast("Error opening URL, it may not be a valid URI", ToastType.Error);
 				console.error("Error opening URL", e);
+			}
+		},
+		// "Open" on a received transfer. `destination` is the download *folder*,
+		// so opening it alone only ever showed the folder. With a single file we
+		// can open the file itself, which is what the button implies; for a
+		// multi-file transfer there's no one file to open, so fall back to the
+		// folder. A shared URL payload is a web link and goes to openUrl.
+		openTransfer: async function(item: DisplayedItem) {
+			if (item.text_type === 'Url' && item.text_payload) {
+				await this.openUrl(item.text_payload);
+				return;
+			}
+
+			if (!item.destination) return;
+
+			try {
+				const files = item.files ?? [];
+				const target = files.length === 1
+					? await join(item.destination, files[0])
+					: item.destination;
+				await openPath(target);
+			} catch (e) {
+				this.toastStore.addToast("Could not open the received file", ToastType.Error);
+				console.error("Error opening transfer", e);
 			}
 		},
 	},
