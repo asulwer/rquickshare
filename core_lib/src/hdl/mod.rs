@@ -20,9 +20,17 @@ pub use blea::*;
 mod blea_win;
 #[cfg(all(feature = "experimental", target_os = "windows"))]
 pub use blea_win::*;
-// Not started yet (issue #425 needs a GATT server); kept as groundwork.
+// BLE receiver advertiser (issue #425). Broadcasts the 0xFEF3 discoverable
+// header so a phone doing BLE-only discovery can list us. Serving the *full*
+// advertisement (GATT / extended adv) is the next milestone.
 #[cfg(all(feature = "experimental", target_os = "windows"))]
 mod blea_recv_win;
+#[cfg(all(feature = "experimental", target_os = "windows"))]
+pub use blea_recv_win::*;
+// Pure byte-format builders for the BLE receiver advertisement, unit-tested.
+// Compiled only where their sole consumer (blea_recv_win) is, so nothing is
+// dead code on other targets - no blanket `allow(dead_code)` needed.
+#[cfg(all(feature = "experimental", target_os = "windows"))]
 mod ble_receiver;
 // Windows WiFi Direct group owner for the WIFI_DIRECT bandwidth-upgrade medium.
 // (A WIFI_HOTSPOT soft-AP lived here too; removed once google/nearby's source

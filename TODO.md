@@ -509,10 +509,95 @@ best available one. Goal: support them all.
 
 ## Parked
 
-- [ ] **#425 — BLE receiver discoverability.** Advertisement format fully
-      reverse-engineered and unit-tested (see `docs/ble-receiver-discovery.md`), but
-      needs a BLE **GATT server** (WinRT / bluer) to serve it, plus phase-2
-      transfer work. Parked with groundwork saved.
+- [x] **#425 — BLE receiver discoverability: WORKING (2026-07-20).** With WiFi
+      **off** on the phone, the PC now appears in Quick Share's target list.
+
+      **What it took — the three things that were each individually wrong:**
+      1. **Wrong WinRT API.** `BluetoothLEAdvertisementPublisher` makes *beacons*
+         (Microsoft's words). Real Quick Share receivers advertise
+         `isPrivateGatt=true` - a connectable **GATT service**. Switched to
+         `GattServiceProvider`. A beacon is never discovered as a ShareTarget no
+         matter how correct its bytes are.
+      2. **Must be connectable.** `IsConnectable=false` -> status 3 (Aborted); a
+         GATT service that can't be connected to won't advertise at all.
+         `IsConnectable=true` -> status 4 (StartedWithoutAllAdvertisementData):
+         Windows puts the 0xFEF3 UUID on-air and *drops* our 26-byte service data
+         (won't fit 31 bytes). **That's fine** - the UUID alone is enough for the
+         phone to find and connect; the payload travels over GATT.
+      3. **Serve the FULL advertisement over GATT, not the fast one.** The phone
+         connects and reads the slot-0 characteristic
+         `00000000-0000-3000-8000-000000000000`. We first served the *fast* form -
+         it read fine but carries **no device name**, so the phone could never
+         build a listable ShareTarget. Serving the non-fast full advertisement
+         (service_id_hash + endpoint_info **with the name** + bt_mac + uwb +
+         extra) made the PC appear.
+
+      **The diagnostic that broke it open:** logging on *our* side when the GATT
+      read is served (`*** served advertisement over GATT read ***`). Everything
+      before that was inference from the phone's logcat, where rotating BLE random
+      addresses make it impossible to tell our PC from a neighbour's phone - which
+      caused one wrong "it works" call (a discovered `deviceType=1` endpoint was a
+      neighbour, not us; see the 0x32 note). **Instrument your own side.**
+
+      Still to do: phase-2 transfer over this connection (the phone lists us; it
+      has not been made to actually transfer with WiFi off yet), and Linux/bluer
+      parity.
+      **Correction:** an earlier "discovery worked" reading was a mis-attribution
+      - the discovered endpoint (GZON, `deviceType=1` phone, "Christine's Pixel 9
+      Pro") was *another phone* in the area advertising as a receiver, NOT our PC
+      (`deviceType=3`). That also explains the "0x32" endpoint_info byte that
+      matched no version of our code: `(0x32>>1)&7 = 1 = phone`. So our own
+      advertisement has **never been confirmed discovered**; do not claim it is.
+
+      State that IS solid:
+      - Our advertiser is on-air: WinRT publisher reaches status 2 (Started),
+        26-byte fast advertisement under 0xFEF3.
+      - `nRF` is useless as a probe here (can't see even the known-good 0xFE2C
+        wake beacon). The phone's logcat is the only working probe, and it only
+        logs adverts it *successfully* parses.
+      - **Google's own Windows Quick Share IS discovered by this phone with WiFi
+        off** (deviceType=3 laptop, listed + transferable), so a Windows PC can be
+        a BLE receiver. Our bytes/method still differ from Google's somehow.
+
+      **SOLID NEGATIVE + prime suspect nailed (2026-07-20).** Clean test: our
+      advertiser Started/on-air 18:02:42-18:05:37; phone scanned FOREGROUND
+      low-latency in many bursts 18:03:33-18:04:57 (fully inside); **found nothing
+      at all** - no `Found BleAdvertisement`. Windows says Started but isn't
+      radiating it discoverably.
+      **Why: 2 bytes over the legacy 31-byte limit.** Compare the wake beacon
+      (`blea_win` 0xFE2C) that provably radiates (phone reacts to it):
+        wake:  UUID(2) + payload(24) = 26  +AD(2) +flags(3) = 31  (fits exactly)
+        ours:  UUID(2) + payload(26) = 28  +AD(2) +flags(3) = 33  (overflows by 2)
+      Fix options, in order of cheapness:
+        1. Suppress the flags AD (WinRT `BluetoothLEAdvertisement.Flags`; a
+           non-connectable advert may not need it) -> 30 bytes, fits.
+        2. Extended advertising + the *fast* payload (we only ever tried extended
+           with the big non-fast advert). Phone scans extended (is-extended-advert
+           =true), so this should be catchable.
+        3. Trim 2+ bytes from the payload (deviates from Google's exact bytes;
+           last resort).
+      Google's advert is the same ~26 bytes and IS discovered, so Google must be
+      doing (1) or (2) - worth confirming.
+
+      **RESUME HERE (next session):** option 2 is now in `blea_recv_win.rs` -
+      `SetUseExtendedAdvertisement(true)` + the fast payload under 0xFEF3. Build,
+      run, and capture logcat while the phone scans FOREGROUND (send sheet open,
+      WiFi off) for ~30s. Verdict test: grep the logcat for `Found BleAdvertisement`
+      and specifically a **`deviceType=3`** discovery = us (a laptop). `deviceType=1`
+      is a neighbour's phone - do NOT mistake it for us again (that was the 0x32
+      mis-read). If extended still isn't found, the issue is Windows not radiating
+      our custom service data discoverably at all; next compare exactly how Google's
+      Windows app advertises (legacy+no-flags vs extended). Our advertiser reaching
+      status 2 (Started) is necessary but NOT proof it's on-air - the phone finding
+      it is the only proof.
+
+      The FAST format itself is almost certainly right (byte-matched to Google's
+      captured advertisement); the open question is Windows radiating it
+      discoverably. Format in `ble_receiver.rs`:
+        Layer 3 fast: `[0x23][endpoint_id(4)][info_len(1)][endpoint_info(17)]`
+        Layer 2 fast: `[0x4A][data][device_token(2)]`  in 0xFEF3 service data.
+      Later milestones once discovered: identity/name resolution (GATT server,
+      `isPrivateGatt`/`rxAdvertisement`), then phase-2 transfer.
       **More valuable than it looked (2026-07-16):** a connection that didn't
       start on the LAN makes google/nearby's `isWifiLanConnected()` false, which
       is what unblocks the WIFI_HOTSPOT upgrade (see the Hotspot entry). It is

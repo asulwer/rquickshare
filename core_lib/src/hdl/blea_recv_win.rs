@@ -1,37 +1,52 @@
-//! Windows BLE *receiver* advertiser (issue #425, Route A: extended advertising).
+//! Windows BLE *receiver* advertiser (issue #425).
 //!
-//! Broadcasts the Nearby Connections discoverable-endpoint advertisement so a
-//! phone doing BLE-only discovery can list this machine as a target:
-//!   - service data under 0xFEF3 = the advertisement header
-//!   - service data under the slot-0 advertisement UUID = the full advertisement
+//! Advertises a **GATT service** under 0xFEF3 carrying the Nearby Connections
+//! fast advertisement as its service data, so a phone doing BLE-only discovery
+//! (WiFi off) lists this machine as a target.
 //!
-//! Both are placed in a BLE 5 *extended* advertisement (the payload exceeds the
-//! 31-byte legacy limit).
-//!
-//! This is a first attempt at the extended-advertising assembly (see
-//! docs/ble-receiver-discovery.md open items) and will be refined against the phone.
-#![allow(dead_code)]
+//! **Why a GATT service provider and not a plain advertisement publisher.**
+//! Every real Quick Share receiver (neighbour phones, Google's own Windows app)
+//! advertises `isPrivateGatt=true` in the phone's logcat - a connectable
+//! GATT-backed advertisement, not a beacon. We spent a while broadcasting via
+//! `BluetoothLEAdvertisementPublisher` (Microsoft: "mainly used to create
+//! beacons"); it reached status Started but the phone's *receiver* discovery
+//! never surfaced us as a ShareTarget, legacy or extended. `GattServiceProvider`
+//! is the connectable/discoverable mechanism the phone actually looks for, and
+//! it also gives us the GATT server needed later to serve the device name.
 
 use tokio_util::sync::CancellationToken;
-use windows::Devices::Bluetooth::Advertisement::{
-    BluetoothLEAdvertisementDataSection, BluetoothLEAdvertisementPublisher,
+use windows::core::GUID;
+use windows::Devices::Bluetooth::GenericAttributeProfile::{
+    GattCharacteristicProperties, GattLocalCharacteristic, GattLocalCharacteristicParameters,
+    GattReadRequestedEventArgs, GattServiceProvider, GattServiceProviderAdvertisingParameters,
 };
+use windows::Foundation::TypedEventHandler;
 use windows::Storage::Streams::DataWriter;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
 use super::ble_receiver;
 
 const INNER_NAME: &str = "BleReceiverAdvertiser";
-const COPRESENCE_UUID16: u16 = 0xFEF3;
 
-// Slot-0 advertisement UUID 00000000-0000-3000-8000-000000000000, in the
-// little-endian byte order BLE service-data sections use.
-const ADV_SLOT0_UUID_LE: [u8; 16] = [
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-];
+// Copresence service 0000FEF3-0000-1000-8000-00805F9B34FB.
+const COPRESENCE_SERVICE_GUID: GUID = GUID::from_u128(0x0000_FEF3_0000_1000_8000_00805F9B34FB);
 
-const AD_TYPE_SERVICE_DATA_16BIT: u8 = 0x16;
-const AD_TYPE_SERVICE_DATA_128BIT: u8 = 0x21;
+// Per-slot advertisement characteristic 00000000-0000-3000-8000-000000000000
+// (slot 0). A peer that finds our advertisement connects and reads this to get
+// the full BleAdvertisement - the `isPrivateGatt` / `rxAdvertisement` flow.
+const ADV_SLOT0_CHARACTERISTIC_GUID: GUID =
+    GUID::from_u128(0x0000_0000_0000_3000_8000_000000000000);
+
+fn adv_status_name(s: i32) -> &'static str {
+    match s {
+        0 => "Created",
+        1 => "Stopped",
+        2 => "Started",
+        3 => "Aborted",
+        4 => "StartedWithoutAllAdvertisementData",
+        _ => "Unknown",
+    }
+}
 
 pub struct BleReceiverAdvertiser {
     endpoint_id: [u8; 4],
@@ -49,7 +64,15 @@ impl BleReceiverAdvertiser {
     }
 
     pub async fn run(&self, ctk: CancellationToken) -> Result<(), anyhow::Error> {
-        let (header, _advertisement) = ble_receiver::build_receiver_advertisement(
+        // Two forms, two channels:
+        //  - fast: compact, for the advertisement packet's service data.
+        //  - full: served over GATT when a peer connects. Carries the device
+        //    name, which is what the phone needs to build a listable
+        //    ShareTarget. Serving the *fast* form here was why the phone read us
+        //    successfully and still never listed us.
+        let advertisement =
+            ble_receiver::build_fast_receiver_advertisement(&self.endpoint_id, self.device_type);
+        let full_advertisement = ble_receiver::build_full_receiver_advertisement(
             &self.endpoint_id,
             self.device_type,
             &self.name,
@@ -60,70 +83,94 @@ impl BleReceiverAdvertiser {
                 let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             }
 
-            let publisher = BluetoothLEAdvertisementPublisher::new()?;
+            // Create the GATT service provider for 0xFEF3.
+            let create_result =
+                GattServiceProvider::CreateAsync(COPRESENCE_SERVICE_GUID)?.get()?;
+            let error = create_result.Error()?;
+            if error.0 != 0 {
+                return Err(anyhow::anyhow!(
+                    "GattServiceProvider::CreateAsync failed: BluetoothError {}",
+                    error.0
+                ));
+            }
+            let provider = create_result.ServiceProvider()?;
 
-            let advert = publisher.Advertisement()?;
-            let sections = advert.DataSections()?;
-            // Legacy advertisement carrying just the 17-byte header under 0xFEF3
-            // (fits in 31 bytes and is visible to legacy scanners, unlike an
-            // extended advertisement). The full advertisement is served over a
-            // GATT characteristic (Route B) — still to be implemented.
-            sections.Append(&service_data_16(COPRESENCE_UUID16, &header)?)?;
+            // Serve the full advertisement from the slot-0 characteristic. The
+            // phone connects after seeing our advert and reads this; with no
+            // characteristic it finds an empty service and gives up, which is
+            // why we were never listed.
+            let char_params = GattLocalCharacteristicParameters::new()?;
+            char_params.SetCharacteristicProperties(GattCharacteristicProperties::Read)?;
+            let char_result = provider
+                .Service()?
+                .CreateCharacteristicAsync(ADV_SLOT0_CHARACTERISTIC_GUID, &char_params)?
+                .get()?;
+            let characteristic = char_result.Characteristic()?;
 
-            publisher.Start()?;
+            let adv_for_read = full_advertisement.clone();
+            characteristic.ReadRequested(&TypedEventHandler::<
+                GattLocalCharacteristic,
+                GattReadRequestedEventArgs,
+            >::new(move |_sender, args| {
+                let Some(args) = args.as_ref() else {
+                    return Ok(());
+                };
+                // Must take a deferral: fetching the request is async and WinRT
+                // will otherwise consider the event handled with no response.
+                let deferral = args.GetDeferral()?;
+                let request = args.GetRequestAsync()?.get()?;
+                let writer = DataWriter::new()?;
+                writer.WriteBytes(&adv_for_read)?;
+                request.RespondWithValue(&writer.DetachBuffer()?)?;
+                deferral.Complete()?;
+                info!("*** {INNER_NAME}: served advertisement over GATT read ***");
+                Ok(())
+            }))?;
+
+            // Connectable: puts the 0xFEF3 service UUID on-air so the phone's
+            // receiver scan finds us. A GATT service must be connectable to
+            // advertise at all (non-connectable -> status 3 Aborted). Our 26-byte
+            // fast advertisement won't also fit the packet (-> status 4,
+            // StartedWithoutAllAdvertisementData), so it is NOT delivered inline;
+            // the phone fetches the advertisement/metadata over the GATT
+            // connection instead (isPrivateGatt / rxAdvertisement). That GATT
+            // characteristic is the next piece to build - for now this just gets
+            // the UUID discoverable so we can confirm the phone finds us.
+            let params = GattServiceProviderAdvertisingParameters::new()?;
+            params.SetIsConnectable(true)?;
+            params.SetIsDiscoverable(false)?;
+
+            let writer = DataWriter::new()?;
+            writer.WriteBytes(&advertisement)?;
+            params.SetServiceData(&writer.DetachBuffer()?)?;
+
+            provider.StartAdvertisingWithParameters(&params)?;
             info!(
-                "{INNER_NAME}: legacy advertising started (header {} B) under 0xFEF3",
-                header.len()
+                "{INNER_NAME}: GATT service advertising started ({} B service data) under 0xFEF3",
+                advertisement.len()
             );
 
             let mut last_status: i32 = -1;
             while !ctk.is_cancelled() {
-                if let Ok(status) = publisher.Status() {
+                if let Ok(status) = provider.AdvertisementStatus() {
                     if status.0 != last_status {
                         last_status = status.0;
-                        info!("{INNER_NAME}: publisher status = {}", last_status);
+                        info!(
+                            "{INNER_NAME}: advertisement status = {} ({})",
+                            last_status,
+                            adv_status_name(last_status)
+                        );
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }
 
             info!("{INNER_NAME}: tracker cancelled, stopping advertiser");
-            let _ = publisher.Stop();
+            let _ = provider.StopAdvertising();
             Ok(())
         })
         .await??;
 
         Ok(())
     }
-}
-
-fn service_data_16(
-    uuid16: u16,
-    payload: &[u8],
-) -> Result<BluetoothLEAdvertisementDataSection, anyhow::Error> {
-    let writer = DataWriter::new()?;
-    writer.WriteByte((uuid16 & 0xFF) as u8)?;
-    writer.WriteByte((uuid16 >> 8) as u8)?;
-    writer.WriteBytes(payload)?;
-    let buffer = writer.DetachBuffer()?;
-
-    let section = BluetoothLEAdvertisementDataSection::new()?;
-    section.SetDataType(AD_TYPE_SERVICE_DATA_16BIT)?;
-    section.SetData(&buffer)?;
-    Ok(section)
-}
-
-fn service_data_128(
-    uuid_le: &[u8; 16],
-    payload: &[u8],
-) -> Result<BluetoothLEAdvertisementDataSection, anyhow::Error> {
-    let writer = DataWriter::new()?;
-    writer.WriteBytes(uuid_le)?;
-    writer.WriteBytes(payload)?;
-    let buffer = writer.DetachBuffer()?;
-
-    let section = BluetoothLEAdvertisementDataSection::new()?;
-    section.SetDataType(AD_TYPE_SERVICE_DATA_128BIT)?;
-    section.SetData(&buffer)?;
-    Ok(section)
 }

@@ -199,11 +199,29 @@ impl RQS {
             }
         });
 
-        // NOTE (issue #425): a BLE "receiver" advertiser is implemented in
-        // hdl::BleReceiverAdvertiser (with the ble_receiver builders, see
-        // docs/ble-receiver-discovery.md) but is intentionally NOT started here.
-        // Making a phone list rquickshare over BLE additionally requires a BLE
-        // GATT server to serve the full advertisement, which is not implemented.
+        // BLE receiver advertiser (issue #425). Broadcasts the 0xFEF3
+        // discoverable-endpoint header so a phone doing BLE-only discovery (WiFi
+        // off) can list us. Milestone M1 is just "header on-air, visible to nRF
+        // Connect"; getting the phone to actually list us (M2) needs the full
+        // advertisement served over GATT or extended advertising - next step.
+        // Non-fatal: like BleListener, it's a nice-to-have.
+        #[cfg(all(feature = "experimental", target_os = "windows"))]
+        {
+            let ble_recv = crate::hdl::BleReceiverAdvertiser::new(
+                endpoint_id[..4].try_into()?,
+                crate::utils::DeviceType::Laptop as u8,
+                ::hostname::get()
+                    .map(|h| h.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| "rquickshare".to_string()),
+            );
+            let ctk = ctoken.clone();
+            tracker.spawn(async move {
+                if let Err(e) = ble_recv.run(ctk).await {
+                    error!("BleReceiverAdvertiser: stopped with an error: {e}");
+                }
+            });
+        }
+
         tracker.close();
 
         Ok((send_channel.0, self.ble_sender.subscribe()))

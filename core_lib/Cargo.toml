@@ -18,6 +18,9 @@ dbus = { version = "0.9", features = ["vendored"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
     "Devices_Bluetooth_Advertisement",
+    # GATT service provider: Quick Share receivers advertise a connectable
+    # GATT service (isPrivateGatt), not a plain beacon, so the phone lists them.
+    "Devices_Bluetooth_GenericAttributeProfile",
     "Devices_WiFiDirect",
     # WiFiDirectConnectionListener hands back a DeviceInformation for the peer;
     # accepting the connection means resolving it by id.
