@@ -610,6 +610,83 @@ best available one. Goal: support them all.
       negotiation belongs, and it makes the WiFi upgrade the other half of #425
       rather than a separate feature.
 
+- [x] **Outbound over BLE (PC -> phone with WiFi off): WORKING (2026-07-20).**
+      A file sent from the PC now reaches a phone that has no WiFi at all.
+      `blea_send.rs` is the client half of the Weave socket and `blea_discovery.rs`
+      finds targets; both use **btleplug**, not WinRT, so unlike the receive path
+      this works on Linux too.
+
+      **Identifying the peer.** 0xFEF3 is a *shared* copresence service - a scan
+      in a populated area turns up plenty of devices running other Nearby
+      services, one of which answered our multiplex request with service hash
+      b7ef32. The name is the discriminator, and it comes from parsing the
+      advertisement with the inverse of the code that builds ours. Note the
+      asymmetry: Android fits the **fast** form (26 B) inside the 31-byte legacy
+      advertisement and broadcasts it inline, while Windows cannot - our 26 bytes
+      are dropped, leaving advertisement status 4 - which is why *we* serve the
+      **full** form from GATT. Reading slot 0 was therefore the wrong default:
+      connecting to 11 devices and reading none was that assumption, not 11 dull
+      devices.
+
+      **The service hash is per-peer and per-session, not a constant.** This was
+      the whole blocker. `fc 9f 5e` = SHA-256("NearbySharing")[:3] is what the
+      phone uses when it connects to *us*, but when we connect to *it* the phone
+      answers on its own hash - 3b4447, then 37330c on the next attempt.
+      Filtering inbound frames on fc9f5e discarded every reply as "multiplex
+      control", so `OutboundRequest` saw nothing, ended in `State::Initial`, and
+      the UI showed nothing at all happening. Control frames are prefixed
+      `00 00 00`; anything else is a service hash. Learn it from the peer's first
+      data frame and send on it.
+
+      **BLE addresses rotate.** One Pixel produced three addresses in two
+      minutes; each looked like a new device, so the same phone appeared in the
+      list repeatedly, and picking an older entry failed with "Not connected"
+      because that address no longer existed. The device *name* is the stable
+      identity: dedup and the peripheral registry key on it, and a rotated
+      address repoints every previously-seen address at the live peripheral so a
+      stale entry in the UI still connects.
+
+      **Flow control has to come from write-with-response.** `WriteType::
+      WithoutResponse` is fire-and-forget - the Windows stack accepts every
+      packet instantly and queues it - so `send_weave` returned immediately while
+      the radio was minutes behind. The transfer reported `Finished` in one
+      second, nothing then answered the phone's keepalives, and it timed out at
+      30s having received only part of the file. Three buffers were shrunk
+      chasing this (the duplex, the pump's accumulator, then reading one frame at
+      a time) and none mattered, because the real queue was in the Bluetooth
+      stack. `WithResponse` waits for the peer's ATT ack and is the only genuine
+      backpressure on this path.
+
+- [ ] **Outbound over BLE is capped at ~600 KB by the keepalive timeout.**
+      The send loop in `outbound.rs` writes chunk after chunk and does not read
+      from the socket until the whole file is done. Over TCP that is invisible;
+      over BLE a 1.9 MB file takes ~95s at 20 KB/s, during which we never answer
+      a KeepAlive, so the phone closes the connection at its 30s timeout -
+      measured exactly, twice. Anything sendable in under 30s works, which is why
+      a 182 KB file transferred fine.
+
+      Smaller payload chunks do **not** help: the loop never reads between
+      chunks, so total send time is unchanged.
+
+      The fix is to service inbound frames while sending, and the hard part is
+      cancel-safety - `stream_read_exact` cannot simply be raced against a
+      timeout, because a cancelled partial read loses bytes and desyncs the
+      stream (the same class of bug as the Weave reassembly). Either a reader
+      task feeding frames over a channel with the crypto state behind a mutex, or
+      a buffered reader that can be polled without committing to a whole frame.
+      This touches the TCP path too, so it wants doing deliberately.
+
+      Note the asymmetry with receiving: `InboundRequest::handle()` services one
+      frame per call in a caller-owned loop, so it interleaves naturally. Only
+      the send side has this problem.
+
+- [ ] **No bandwidth upgrade when we are the sender.** Measured: the phone never
+      sends UPGRADE_PATH_AVAILABLE when it is the receiver - there is not one in
+      a full WiFi-off transfer, and `outbound.rs` now logs any that arrives. So
+      we would have to ask with UPGRADE_PATH_REQUEST and then *join* whatever it
+      proposes, which on Windows means `WlanConnect` rather than the tethering
+      the receive path uses. Until then outbound stays at BLE speed.
+
 - [x] **Bandwidth upgrade to WIFI_HOTSPOT over the BLE channel: WORKING
       (2026-07-20).** A file sent from a phone with WiFi **off** now arrives over
       WiFi in ~11s instead of ~2min over BLE, with only ~3 KB ever crossing BLE.
@@ -680,6 +757,16 @@ best available one. Goal: support them all.
       `introduce_upgraded_channel` (CLIENT_INTRODUCTION/ACK, #27) is reused
       unchanged. `WindowsHotspot` now has a `Drop` that stops tethering, so the
       radio isn't left in AP mode.
+
+      **Only offer it to a peer that has no network.** A phone with WiFi *on*
+      advertises WIFI_LAN in its ConnectionRequest, and offering that peer a
+      soft-AP asks it to leave the network it already has - which google/nearby
+      refuses outright ("this will destroy WIFI_LAN"). Measured: such a phone
+      completed the entire upgrade handshake (joined the AP, introduced itself,
+      ACKed, LAST_WRITE/SAFE_TO_CLOSE) and then sent nothing on the new socket,
+      hanging the transfer indefinitely. The offer is now skipped when the peer
+      advertises WIFI_LAN, and the switch requires the first byte within 20s so a
+      silent peer is a logged failure rather than a hang.
 
       **Still to do:** swap the encrypted stream onto the accepted socket (#28) —
       today `introduce_upgraded_channel` completes the introduction and the

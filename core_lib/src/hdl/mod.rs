@@ -30,8 +30,24 @@ pub use blea_recv_win::*;
 // Pure byte-format builders for the BLE receiver advertisement, unit-tested.
 // Compiled only where their sole consumer (blea_recv_win) is, so nothing is
 // dead code on other targets - no blanket `allow(dead_code)` needed.
-#[cfg(all(feature = "experimental", target_os = "windows"))]
+// Not Windows-only any more: the send path parses a *peer's* advertisement with
+// the same code that builds ours, and that path runs on Linux too.
+#[cfg(feature = "experimental")]
 mod ble_receiver;
+#[cfg(feature = "experimental")]
+pub use ble_receiver::{parse_full_advertisement, parse_peer_advertisement};
+// BLE *client* half of the Weave socket, for sending to a phone with WiFi off.
+// btleplug rather than WinRT, so this one works on Linux too.
+#[cfg(feature = "experimental")]
+mod blea_send;
+#[cfg(feature = "experimental")]
+pub use blea_send::*;
+// Finds phones advertising as receivers over BLE, so there is something to send
+// to when the peer has no IP.
+#[cfg(feature = "experimental")]
+mod blea_discovery;
+#[cfg(feature = "experimental")]
+pub use blea_discovery::*;
 // Windows soft-AP for the WIFI_HOTSPOT bandwidth-upgrade medium. Removed in
 // 908ab5b because a phone can never accept that upgrade from a WiFi-LAN
 // connection - with the note "it's in git history if BLE ever makes it

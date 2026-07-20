@@ -152,6 +152,100 @@ pub fn build_full_receiver_advertisement(
     build_medium_advertisement_full(&data, &device_token())
 }
 
+// ---- Parsing a peer's advertisement (the send path) ------------------------
+
+/// Device name and type out of a **full** BleAdvertisement, as served from a
+/// peer's slot-0 GATT characteristic.
+///
+/// The inverse of `build_full_receiver_advertisement`. Only the full form
+/// carries a name - the fast form has no room for one, which is why a peer has
+/// to be connected to and read rather than merely scanned.
+///
+/// Returns `None` if this isn't a NearbySharing advertisement, which is also how
+/// the send path tells a Quick Share receiver from the many other devices
+/// advertising the same 0xFEF3 copresence service.
+/// What a peer's BleAdvertisement tells us about it.
+#[derive(Debug, Clone)]
+pub struct PeerAdvertisement {
+    /// Absent in the fast form, which has no room for a name.
+    pub name: Option<String>,
+    pub device_type: u8,
+    pub endpoint_id: [u8; 4],
+}
+
+/// Parse a peer's advertisement in either form.
+///
+/// Both are NearbySharing; which one you get depends on the platform. Android
+/// fits the **fast** form (26 bytes) inside the 31-byte legacy advertisement and
+/// broadcasts it inline. Windows cannot - our own 26 bytes are dropped, leaving
+/// advertisement status 4 - so we serve the **full** form from a GATT
+/// characteristic instead. A peer may therefore be identified straight from its
+/// advertisement, with no connection needed.
+///
+/// `None` means this is not a NearbySharing advertisement at all, which is how
+/// the send path tells a Quick Share peer from the many other devices sharing
+/// the 0xFEF3 copresence service.
+pub fn parse_peer_advertisement(adv: &[u8]) -> Option<PeerAdvertisement> {
+    let first = *adv.first()?;
+    // Layer 2 version byte: bit1 set = fast.
+    if first & 0x02 != 0 {
+        parse_fast_advertisement(adv)
+    } else {
+        parse_full_advertisement(adv).map(|(name, device_type)| PeerAdvertisement {
+            name: Some(name),
+            device_type,
+            endpoint_id: [0; 4],
+        })
+    }
+}
+
+/// Fast layer 2: `[0x4A][layer3][device_token(2)]`, where layer 3 is
+/// `[0x23][endpoint_id(4)][info_len][endpoint_info]`. No service_id_hash and no
+/// name, so identification rests on the version/pcp bytes.
+fn parse_fast_advertisement(adv: &[u8]) -> Option<PeerAdvertisement> {
+    if adv.len() < 9 || adv[1] != 0x23 {
+        return None;
+    }
+    let endpoint_id: [u8; 4] = adv.get(2..6)?.try_into().ok()?;
+    let info_len = adv[6] as usize;
+    let info = adv.get(7..7 + info_len)?;
+    let device_type = (info.first()? >> 1) & 0x07;
+
+    Some(PeerAdvertisement {
+        name: None,
+        device_type,
+        endpoint_id,
+    })
+}
+
+pub fn parse_full_advertisement(adv: &[u8]) -> Option<(String, u8)> {
+    let hash = service_id_hash();
+
+    // Layer 2: [version byte][service_id_hash(3)][data_size u32 BE][data][token(2)]
+    if adv.len() < 8 || adv[1..4] != hash[..] {
+        return None;
+    }
+    let data_size = u32::from_be_bytes([adv[4], adv[5], adv[6], adv[7]]) as usize;
+    let data = adv.get(8..8 + data_size)?;
+
+    // Layer 3: [version/pcp][service_id_hash(3)][endpoint_id(4)][info_len][endpoint_info]...
+    if data.len() < 9 || data[1..4] != hash[..] {
+        return None;
+    }
+    let info_len = data[8] as usize;
+    let info = data.get(9..9 + info_len)?;
+
+    // endpoint_info: [bitfield][16 salt+metadata key][name_len][name]
+    if info.len() < 18 {
+        return None;
+    }
+    let device_type = (info[0] >> 1) & 0x07;
+    let name_len = info[17] as usize;
+    let name = info.get(18..18 + name_len)?;
+
+    Some((String::from_utf8_lossy(name).into_owned(), device_type))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +267,31 @@ mod tests {
         assert_eq!(adv[7], 0x16);
         // total: 1 (L2 ver) + 1 (L3 ver) + 4 (id) + 1 (len) + 17 (info) + 2 (token).
         assert_eq!(adv.len(), 26);
+    }
+
+    #[test]
+    fn full_advertisement_round_trips() {
+        let adv = build_full_receiver_advertisement(b"NX8G", 3, "Aaron's Pixel");
+        let (name, device_type) = parse_full_advertisement(&adv).expect("should parse");
+        assert_eq!(name, "Aaron's Pixel");
+        assert_eq!(device_type, 3);
+    }
+
+    #[test]
+    fn fast_advertisement_is_not_mistaken_for_full() {
+        // The fast form has no name and no service_id_hash; parsing it as full
+        // must fail rather than return garbage, since that is how the send path
+        // filters non-Quick-Share peers.
+        let adv = build_fast_receiver_advertisement(b"NX8G", 3);
+        assert!(parse_full_advertisement(&adv).is_none());
+    }
+
+    #[test]
+    fn truncated_advertisement_does_not_panic() {
+        let adv = build_full_receiver_advertisement(b"NX8G", 3, "Phone");
+        for n in 0..adv.len() {
+            let _ = parse_full_advertisement(&adv[..n]);
+        }
     }
 
     #[test]

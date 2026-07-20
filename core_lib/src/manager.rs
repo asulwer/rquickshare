@@ -152,13 +152,39 @@ impl TcpServer {
     }
 
     /// To be called inside a separate task if we want to handle concurrency
+    ///
+    /// `si.addr` is normally `ip:port` from mDNS. A peer found over BLE has no
+    /// IP, so `BleDiscovery` reports it as `ble:<bluetooth address>` and it is
+    /// routed onto the Weave socket instead - which is the only way to reach a
+    /// phone whose WiFi is off.
     pub async fn connect(&self, ctk: CancellationToken, si: SendInfo) -> Result<(), anyhow::Error> {
         debug!("{INNER_NAME}: Connecting to: {}", si.addr);
-        let socket = TcpStream::connect(si.addr.clone()).await?;
 
+        #[cfg(feature = "experimental")]
+        if let Some(address) = si.addr.strip_prefix("ble:") {
+            let address = address.to_string();
+            let stream = crate::hdl::open_ble_by_address(&address).await?;
+            return self.drive_outbound(ctk, si, stream).await;
+        }
+
+        let socket = TcpStream::connect(si.addr.clone()).await?;
+        self.drive_outbound(ctk, si, socket).await
+    }
+
+    /// The transport-independent half of `connect`: everything after a stream
+    /// exists. Generic so the same code drives TCP and the BLE Weave socket.
+    async fn drive_outbound<S>(
+        &self,
+        ctk: CancellationToken,
+        si: SendInfo,
+        stream: S,
+    ) -> Result<(), anyhow::Error>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
         let mut or = OutboundRequest::new(
             self.endpoint_id,
-            socket,
+            stream,
             si.id,
             self.sender.clone(),
             si.ob,

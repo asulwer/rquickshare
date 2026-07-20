@@ -316,6 +316,28 @@ impl RQS {
             });
         }
 
+        // Discover BLE receivers alongside mDNS. mDNS only ever finds peers
+        // that share a network with us; a phone with WiFi off is invisible to
+        // it and reachable only over BLE.
+        #[cfg(feature = "experimental")]
+        {
+            // Fresh start: a peer that has left the network must not stay
+            // suppressed from the BLE list by a stale entry.
+            crate::hdl::clear_lan_peers();
+            let ctk_bled = ctk.clone();
+            let ble_sender = sender.clone();
+            tracker.spawn(async move {
+                match crate::hdl::BleDiscovery::new(ble_sender).await {
+                    Ok(d) => {
+                        if let Err(e) = d.run(ctk_bled).await {
+                            error!("BleDiscovery: stopped with an error: {e}");
+                        }
+                    }
+                    Err(e) => error!("Couldn't init BleDiscovery: {e}"),
+                }
+            });
+        }
+
         let mut discovery = MDnsDiscovery::new(sender)?;
         if let Some(session) = qr_session {
             discovery = discovery.with_qr_session(session);

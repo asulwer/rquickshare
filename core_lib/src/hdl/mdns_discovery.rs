@@ -178,6 +178,11 @@ impl MDnsDiscovery {
                                             present: Some(true),
                                             qr_match: Some(qr_match),
                                         };
+                                        // Let BLE discovery know this peer is
+                                        // reachable over the network, so it
+                                        // doesn't list the same phone twice.
+                                        #[cfg(feature = "experimental")]
+                                        crate::hdl::note_lan_peer(&dn);
                                         info!("ServiceResolved: Resolved a new service: {:?}", ei);
                                         cache.insert(fullname.clone(), ei.clone());
                                         let _ = self.sender.send(ei);

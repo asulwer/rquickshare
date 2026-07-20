@@ -105,6 +105,10 @@ pub struct InboundRequest<S> {
     /// stream may now move onto the upgraded socket.
     #[cfg(all(feature = "experimental", target_os = "windows"))]
     switch_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+    /// Whether the peer advertised WIFI_LAN, i.e. it is already on a network.
+    /// Offering such a peer our soft-AP asks it to abandon that network, which
+    /// google/nearby refuses outright ("this will destroy WIFI_LAN").
+    peer_has_wifi_lan: bool,
     /// When we last answered a KeepAlive, so redundant responses can be skipped.
     /// Not transport-specific, but it matters on BLE: see the KeepAlive arm.
     last_keepalive_response: Option<std::time::Instant>,
@@ -136,6 +140,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
             wifi_direct: None,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
             wifi_direct_creds: None,
+            peer_has_wifi_lan: false,
             last_keepalive_response: None,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
             upgrade_tx: None,
@@ -306,7 +311,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
     }
 
     fn process_connection_request(
-        &self,
+        &mut self,
         frame: &location_nearby_connections::OfflineFrame,
     ) -> Result<RemoteDeviceInfo, anyhow::Error> {
         let v1_frame = frame
@@ -337,6 +342,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
             "ConnectionRequest: mediums (raw) = {:?}",
             connection_request.mediums
         );
+        // 5 = WIFI_LAN. Remember whether the peer already has a network, because
+        // offering it a soft-AP would mean asking it to leave one.
+        self.peer_has_wifi_lan = connection_request.mediums.contains(&5);
 
         // The phone states, unprompted, which channels it can actually use as a
         // WiFi Direct *client* - and the frequency of the AP it's sitting on.
@@ -780,7 +788,25 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
             match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
                 Ok(l) => {
                     info!("Bandwidth upgrade: listening on 0.0.0.0:{port}");
-                    match l.accept().await {
+                    // Bounded. The phone joined in ~5s in every successful run,
+                    // and it abandons the upgrade after ~68s anyway. An
+                    // unbounded accept leaks this task for the life of the
+                    // process and holds port 8899, so one phone that never
+                    // joined would break every subsequent transfer's upgrade.
+                    let accepted =
+                        match tokio::time::timeout(std::time::Duration::from_secs(45), l.accept())
+                            .await
+                        {
+                            Ok(r) => r,
+                            Err(_) => {
+                                warn!(
+                                    "Bandwidth upgrade: no peer joined the hotspot within 45s; \
+                                     staying on the prior channel"
+                                );
+                                return;
+                            }
+                        };
+                    match accepted {
                         Ok((s, addr)) => {
                             info!("*** Bandwidth upgrade: phone connected from {addr} ***");
                             match introduce_upgraded_channel(s).await {
@@ -808,6 +834,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
                         Err(e) => warn!("Bandwidth upgrade: accept failed: {e}"),
                     }
                 }
+                // AddrInUse here means a previous transfer's listener is still
+                // holding the port. The transfer still works - it just stays on
+                // the prior channel - so say which it is rather than failing
+                // opaquely.
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => warn!(
+                    "Bandwidth upgrade: port {port} still held by a previous transfer; \
+                     staying on the prior channel"
+                ),
                 Err(e) => warn!("Bandwidth upgrade: bind failed: {e}"),
             }
         });
@@ -1715,6 +1749,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
             if let Err(e) = self.offer_wifi_direct_upgrade().await {
                 warn!("offer_wifi_direct_upgrade failed: {}", e);
             }
+        } else if self.peer_has_wifi_lan {
+            // Offering a soft-AP to a peer that already has a network asks it to
+            // leave that network, and google/nearby rejects WIFI_HOTSPOT
+            // outright while WIFI_LAN is up ("this will destroy WIFI_LAN").
+            // Measured: a phone with WiFi on completed the entire upgrade
+            // handshake - joined the AP, introduced itself, ACKed,
+            // LAST_WRITE/SAFE_TO_CLOSE - and then sent nothing on the new
+            // socket, hanging the transfer.
+            //
+            // Nothing is lost by skipping it. A peer on WIFI_LAN either reached
+            // us over the network already, or can be reached that way, and
+            // either is faster than the BLE fallback this would upgrade from.
+            info!(
+                "Bandwidth upgrade: peer already has WIFI_LAN, not offering a hotspot it would \
+                 have to leave its network to join"
+            );
         } else if let Err(e) = self.offer_wifi_hotspot_upgrade().await {
             warn!("offer_wifi_hotspot_upgrade failed: {}", e);
         }

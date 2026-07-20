@@ -532,6 +532,22 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
                 trace!("Sending keepalive");
                 self.send_keepalive(true).await?;
             }
+            location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation => {
+                // Log only, for now. Sending over BLE is stuck at ~20 KB/s and
+                // will hit the same ~1 MB indication-timeout wall the receive
+                // path did, so an upgrade matters here as much as it did there -
+                // but the roles are reversed. Receiving, we host the medium and
+                // push UPGRADE_PATH_AVAILABLE. Sending, the *phone* is the
+                // server, so it offers and we would have to join its network,
+                // which on Windows means WlanConnect rather than tethering.
+                //
+                // Whether it offers at all, and on which medium, decides the
+                // shape of that work - so record it before writing any.
+                info!(
+                    "Bandwidth upgrade offered by peer: {:?}",
+                    v1_frame.bandwidth_upgrade_negotiation
+                );
+            }
             location_nearby_connections::v1_frame::FrameType::Disconnection => {
                 // The remote device closed the session (normal after a transfer
                 // completes). End cleanly rather than logging it as an error.

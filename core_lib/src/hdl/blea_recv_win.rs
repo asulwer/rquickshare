@@ -309,6 +309,47 @@ impl BleReceiverAdvertiser {
                                 info!(
                                     "{INNER_NAME}: switching the stream onto the upgraded socket"
                                 );
+
+                                // The peer has occasionally completed the whole
+                                // upgrade handshake and then sent nothing at
+                                // all. `copy_bidirectional` waits forever on
+                                // that, so the transfer hangs at whatever
+                                // percentage it reached with not one line in the
+                                // log - indistinguishable from a crash. Require
+                                // the first byte within 20s; a peer that
+                                // switched mediums and meant it starts
+                                // immediately.
+                                let mut first = [0u8; 8192];
+                                let n = match tokio::time::timeout(
+                                    std::time::Duration::from_secs(20),
+                                    sock.read(&mut first),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(0)) => {
+                                        warn!(
+                                            "{INNER_NAME}: peer closed the upgraded socket without \
+                                             sending anything"
+                                        );
+                                        break;
+                                    }
+                                    Ok(Ok(n)) => n,
+                                    Ok(Err(e)) => {
+                                        warn!("{INNER_NAME}: upgraded socket failed: {e}");
+                                        break;
+                                    }
+                                    Err(_) => {
+                                        warn!(
+                                            "{INNER_NAME}: nothing on the upgraded socket within \
+                                             20s; the peer completed the upgrade and went silent"
+                                        );
+                                        break;
+                                    }
+                                };
+                                if ours.write_all(&first[..n]).await.is_err() {
+                                    break;
+                                }
+
                                 match tokio::io::copy_bidirectional(&mut sock, &mut ours).await {
                                     Ok((from_phone, to_phone)) => info!(
                                         "{INNER_NAME}: upgraded socket closed ({from_phone} B in, \
