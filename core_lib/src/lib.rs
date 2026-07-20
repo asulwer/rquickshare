@@ -43,6 +43,37 @@ fn bind_dual_stack(port: u32) -> Result<TcpListener, anyhow::Error> {
     Ok(TcpListener::from_std(socket.into())?)
 }
 
+/// Log panics before they reach a foreign callback boundary.
+///
+/// A panic inside a WinRT `TypedEventHandler` cannot unwind across the
+/// `extern "system"` boundary, so the runtime aborts instead - and Windows
+/// reports that abort as STATUS_STACK_BUFFER_OVERRUN, which surfaces to the
+/// user as a "buffer overrun" crash with *nothing* in the log. The hook runs
+/// before unwinding starts, so it is the only place the real message and
+/// location survive. Also goes to stderr, because the file logger may never
+/// get a chance to flush.
+fn install_panic_logger() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let loc = info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .unwrap_or_else(|| "unknown location".to_string());
+            let msg = info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".to_string());
+            eprintln!("PANIC at {loc}: {msg}");
+            error!("PANIC at {loc}: {msg}");
+            default(info);
+        }));
+    });
+}
+
 pub mod channel;
 mod errors;
 mod hdl;
@@ -129,6 +160,8 @@ impl RQS {
     pub async fn run(
         &mut self,
     ) -> Result<(mpsc::Sender<SendInfo>, broadcast::Receiver<()>), anyhow::Error> {
+        install_panic_logger();
+
         let tracker = TaskTracker::new();
         let ctoken = CancellationToken::new();
         self.tracker = Some(tracker.clone());
@@ -213,6 +246,7 @@ impl RQS {
                 ::hostname::get()
                     .map(|h| h.to_string_lossy().into_owned())
                     .unwrap_or_else(|_| "rquickshare".to_string()),
+                self.message_sender.clone(),
             );
             let ctk = ctoken.clone();
             tracker.spawn(async move {

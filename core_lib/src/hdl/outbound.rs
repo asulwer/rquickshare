@@ -474,7 +474,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
 
                 match header.r#type() {
                     payload_header::PayloadType::Bytes => {
-                        info!("Processing PayloadType::Bytes");
+                        // Once per chunk, so `trace`.
+                        trace!("Processing PayloadType::Bytes");
                         let payload_id = header.id();
 
                         if header.total_size() > SANE_FRAME_LENGTH.into() {

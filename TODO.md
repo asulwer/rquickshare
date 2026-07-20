@@ -539,9 +539,140 @@ best available one. Goal: support them all.
       caused one wrong "it works" call (a discovered `deviceType=1` endpoint was a
       neighbour, not us; see the 0x32 note). **Instrument your own side.**
 
-      Still to do: phase-2 transfer over this connection (the phone lists us; it
-      has not been made to actually transfer with WiFi off yet), and Linux/bluer
-      parity.
+- [x] **#425 phase 2 — transfer over BLE: WORKING, throughput-limited
+      (2026-07-20).** A file sent from the phone with WiFi **off** is received,
+      decrypted and written correctly. Discovery -> Weave handshake -> UKEY2 ->
+      encrypted stream -> payload all run over the BLE socket, reusing the
+      existing `InboundRequest` (which is generic over `AsyncRead + AsyncWrite`,
+      so the whole Nearby stack rides a `tokio::io::duplex` unchanged).
+
+      **The four bugs, each of which looked like the previous one:**
+      1. **`handle()` services one frame and returns.** `TcpServer` wraps it in a
+         loop; the bridge called it once, so after the ConnectionRequest the task
+         ended, dropped its end of the duplex, and every later message was
+         discarded by a `let _ = send(..)`. No error anywhere. Loop it, and never
+         swallow a failed send.
+      2. **Weave counter is shared by control *and* data packets, per direction.**
+         The phone proves it: ConnectionRequest ctr 0, data 1-4, Error ctr 5. Our
+         ConnectionConfirm took ctr 0 and the data sender restarted at 0, so we
+         sent ctr 0 twice and got a Weave Error (`0xd2`).
+      3. **WinRT dispatches `WriteRequested` on threadpool threads.** BLE delivers
+         in order; our handlers do not run in order. A capture showed ctr=2
+         (last fragment) reassembled before ctr=1 (first), which emitted a
+         tail-only message and flushed ctr=1's head as a bogus "multiplex
+         control" frame -> D2D sequence 103 -> 104 -> session dead mid-file.
+         **Trust the counter, not arrival order:** park each packet in a slot and
+         consume only the expected one.
+      4. **`len` vs `buf.len()`.** The data branch moves `buf` into its slot; a
+         later block still guarded on the *original* `len` and indexed `buf[0]`,
+         panicking on every data packet. A panic in a WinRT callback can't unwind
+         across the `extern "system"` boundary, so it aborts - and Windows
+         reports that as `STATUS_STACK_BUFFER_OVERRUN`, i.e. "buffer overrun"
+         with an empty log. Guard on the live length.
+
+      **Where it stands: correctness is done, throughput is the blocker.**
+      Steady **20.5 KB/s** received. The phone pushes **41 KB/s** (its own
+      logcat: `Sent FILE data(2376328 bytes) via BLE used 55652 ms ... (41 KB/s)`)
+      and reports `SUCCESS, 100%` when the bytes leave Nearby for its socket -
+      which is why its progress bar runs ahead of ours and why a truncated file
+      still looks "sent". Oversubscribed ~2:1, the phone's stack jams
+      (`gatt_act_write() failed op_code=0x52 rt=143`, Android `143 =
+      GATT_CONGESTED`, repeating throughout), our indications back up
+      (`ind_count=11`), and an indication unconfirmed for 30 s obliges the stack
+      to drop the ACL - the phone logs `REMOTE_USER_TERMINATED_CONNECTION`, i.e.
+      **the PC killed the link**. Net effect: reliable under ~1.5 MB, fails above
+      it. The phone's own `KeepAlive timeout(30000 ms)` line is logged *after*
+      the disconnect and is a symptom, not the cause.
+
+      **Not yet established:** whether the 20.5 KB/s ceiling is our receive path
+      (~25 ms per 509-byte write, which would make it ours to fix) or the
+      connection interval (the central's choice, which WinRT does not expose to
+      a GATT server). ~25 ms/packet is suspiciously interval-shaped, but nobody
+      has timed the write handler. **Measure before concluding.** Candidate
+      fixes, in order: time the handler; drop `Indicate` from the server-tx
+      properties so our sends need no confirmation and cannot trigger the ATT
+      timeout that terminates the link (note: Notify-alone previously produced an
+      empty delivery list, so verify rather than assume); reduce per-write work.
+      Surviving slowly is worth more than dying fast - even at 20 KB/s a
+      transfer that never gets terminated eventually completes.
+
+      **Also learned:** per-packet logging on the receive path is not free. Three
+      `info!` calls inside the WinRT callback, plus a per-chunk `info!` in
+      `inbound.rs` and another Debug-formatting the whole `ChannelMessage` in
+      `main.rs`, throttled us below the phone's send rate and cost a 1.9 MB photo
+      40% of its bytes. All demoted to `trace`. Throughput accounting now lives
+      in the pump task, off the callback thread.
+
+      **The phone is asking for the upgrade.** `NearbySharing: timeout when
+      waiting for high-quality medium` / `HIGH_QUALITY_MEDIUM_SETUP duration:
+      68381, timeout: true` - it spends 68 s waiting for us to offer a faster
+      medium and never gets one. This BLE channel is exactly where that
+      negotiation belongs, and it makes the WiFi upgrade the other half of #425
+      rather than a separate feature.
+
+      **PHASE 2 (transfer over BLE) - socket is OPEN, data is flowing
+      (2026-07-20).** With WiFi off the phone now connects and streams the real
+      Nearby protocol to us. What it took:
+
+      - Medium is **BLE** (`attempting to connect to endpoint X over mediums
+        [BLE]`), not Bluetooth Classic or L2CAP. With WiFi off, availableMediums
+        has no WIFI_LAN, so BLE is the initial channel.
+      - Socket layer is **uWeave** over two GATT characteristics on our 0xFEF3
+        service (`MultiplexBleSocketImpl`):
+          client tx (phone -> us, write)  = 00000100-0004-1000-8000-001a11000101
+          server tx (us -> phone, notify) = 00000100-0004-1000-8000-001a11000102
+        Missing the first gives `missing client tx characteristic ...0101`.
+      - **server tx must declare Notify AND Indicate.** With Notify alone
+        `NotifyValueAsync` returned an *empty* result list - delivered to nobody -
+        even though `SubscribedClients()` said 1. That empty list is the tell.
+      - **Weave handshake:** phone writes ConnectionRequest
+        `[0x80][ver_min u16][ver_max u16][max_packet u16]` (observed
+        `80 00 01 00 01 01 fd` = v1..v1, 509 B). We must reply with
+        ConnectionConfirm `[0x81][version u16][packet_size u16]` as a
+        notification. Without it: `GATT_SWITCH_TO_DATA_TRANSFERRING_FAILED
+        [TIMEOUT]`, then the phone sends control `[0x92]` (command 2 = Error).
+      - Do **not** block on `.get()` inside a WinRT event handler - 0x8000000E
+        (E_ILLEGAL_METHOD_CALL). A worker thread doesn't work either (IBuffer
+        isn't Send). Use an `AsyncOperationCompletedHandler`.
+
+      **Wire format once open** (first byte = Weave header, bit7 clear = data,
+      bits 6-4 = packet counter, low nibble = first/last fragment flags):
+      ```
+      1c | 00 00 00 08 | 01 12 1f 0a 03 fc 9f 5e ...
+      28 | fc 9f 5e | 00 00 02 ac | 08 01 12 a7 05 ...   (first fragment)
+      34 | 36 ab 31 d3 ...                                (last fragment)
+      ```
+      Inside: `fc 9f 5e` = service_id_hash, then a **4-byte BE length + protobuf
+      OfflineFrame** - the same framing the TCP path already parses. Note
+      "Multiplex" in the class name and the packets whose payload starts
+      `00 00 00 08` without the hash: there is a multiplex/control layer to work
+      out alongside the Nearby frames.
+
+      **MULTIPLEX LAYER DECODED (2026-07-20).** After Weave reassembly there are
+      two kinds of message, told apart by the first 3 bytes:
+
+      1. **`fc 9f 5e` = NearbySharing data.** Framing:
+         `[service_id_hash(3)][u32 BE length][OfflineFrame protobuf]`
+         **Strip the 3-byte hash and the rest is byte-identical to what the TCP
+         path already parses** (`[u32 len][frame]`). Observed: a 681-byte frame
+         containing "Aaron's Pixel 10 Pro" (ConnectionRequest) and a 136-byte
+         frame with `AES_256_CBC-HMAC_SHA256` + 32-byte commitment + 64-byte key
+         (UKEY2 ClientInit). So the phone runs the *normal* handshake over BLE.
+      2. **`00 00 00` = multiplex control.** `[00 00 00][protobuf]`, no length
+         field. e.g. `08 01 12 1f 0a 03 fc9f5e 10 02 1a 16 "<22-char id>"` -
+         channel setup naming the service - and `08 02 1a 05 0a 03 fc9f5e`.
+
+      **Bridge plan:** weave-reassembled message -> if it starts `fc 9f 5e`, drop
+      those 3 bytes and feed `[u32 len][frame]` into a duplex stream -> hand the
+      other half to `InboundRequest` (generic, unchanged). Outbound: take what
+      `InboundRequest` writes, prepend `fc 9f 5e`, fragment to (packet_size-1)
+      byte Weave data packets with header
+      `(counter<<4) | (first<<3) | (last<<2)`, notify on server-tx.
+      Note WinRT constraint: the GATT objects aren't `Send`, so the notify side
+      must stay on the thread that owns the provider - use channels to reach it.
+
+      **Remaining:** implement that bridge, answer the multiplex control frames,
+      then Linux/bluer parity.
       **Correction:** an earlier "discovery worked" reading was a mis-attribution
       - the discovered endpoint (GZON, `deviceType=1` phone, "Christine's Pixel 9
       Pro") was *another phone* in the area advertising as a receiver, NOT our PC

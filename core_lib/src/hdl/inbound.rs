@@ -977,7 +977,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
                         }
                     }
                     payload_header::PayloadType::File => {
-                        info!("Processing PayloadType::File");
+                        // Once per chunk (~35/s over BLE), so `trace`.
+                        trace!("Processing PayloadType::File");
                         let payload_id = header.id();
 
                         let file_internal = self

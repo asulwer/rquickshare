@@ -298,7 +298,16 @@ fn rs2js_channelmessage(message: ChannelMessage, manager: &AppHandle) {
         return;
     }
 
-    info!("rs2js_channelmessage: {message:?}");
+    // Progress ticks arrive once per payload chunk - roughly 35/s over BLE -
+    // and each one Debug-formats the whole struct (file list, destination,
+    // device info) before it can be filtered. That formatting cost lands on
+    // the thread draining the transfer, so keep the per-chunk case at `trace`
+    // and log only the state transitions at `info`.
+    if message.state == Some(State::ReceivingFiles) || message.state == Some(State::SendingFiles) {
+        trace!("rs2js_channelmessage: {message:?}");
+    } else {
+        info!("rs2js_channelmessage: {message:?}");
+    }
     manager.emit("rs2js_channelmessage", &message).unwrap();
 }
 
