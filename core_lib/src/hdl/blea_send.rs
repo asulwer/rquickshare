@@ -100,7 +100,13 @@ pub async fn open_ble_by_address(address: &str) -> Result<BleChannel, anyhow::Er
 
 /// Connect, complete the Weave handshake as the client, and return the channel.
 pub async fn open(peripheral: Peripheral) -> Result<BleChannel, anyhow::Error> {
-    if !peripheral.is_connected().await? {
+    // Was the link already held? If a send fails right after a receive, this
+    // says whether we were contending with a connection that should have been
+    // dropped - which is the standing theory for why alternating directions is
+    // unreliable.
+    let already = peripheral.is_connected().await.unwrap_or(false);
+    info!("{INNER_NAME}: peer already connected = {already}");
+    if !already {
         peripheral.connect().await?;
     }
     peripheral.discover_services().await?;
@@ -317,6 +323,17 @@ pub async fn open(peripheral: Peripheral) -> Result<BleChannel, anyhow::Error> {
                     }
                 }
             }
+        }
+
+        // Let go of the peer.
+        //
+        // We hold a GATT *client* connection for the whole send and never
+        // released it, so after a PC -> phone transfer the phone stayed
+        // connected to us - and stopped being discoverable as a receiver. The
+        // symptom was the PC vanishing from the phone's list and phone -> PC
+        // failing until something reset the link.
+        if let Err(e) = peripheral.disconnect().await {
+            debug!("{INNER_NAME}: disconnect failed: {e}");
         }
 
         if heard_from_peer {

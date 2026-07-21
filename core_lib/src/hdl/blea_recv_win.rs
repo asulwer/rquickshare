@@ -104,12 +104,34 @@ impl BleReceiverAdvertiser {
         //  outbound: InboundRequest -> duplex -> (prepend fc9f5e) -> notify
         // The GATT objects aren't Send, so notifying has to happen back on the
         // thread that owns them; bytes travel over channels instead.
-        let (inbound_tx, mut inbound_rx) =
-            tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        // One bridge *per Weave connection*, not per process.
+        //
+        // These were built once at startup, so when an InboundRequest ended -
+        // for any reason at all - the bridge died with it and every later BLE
+        // connection was answered at the Weave level and then dropped on the
+        // floor. The phone reconnected, got a ConnectionConfirm, and talked to
+        // nobody. One failure poisoned BLE receive until the app was restarted,
+        // which is exactly the "restart only buys one more attempt" behaviour we
+        // kept hitting. It also leaked handshake state between connections: a
+        // fresh peer's ClientInit arrived at a request still in
+        // SentUkeyServerInit and failed as "message_type(1) != ClientFinish".
+        //
+        // The write handler therefore cannot hold a fixed sender; it writes into
+        // whichever session is current.
+        let inbound_slot: std::sync::Arc<
+            std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let down_slot: std::sync::Arc<
+            std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<()>>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let handler_inbound = inbound_slot.clone();
+        let handler_down = down_slot.clone();
+        // Signalled by the write handler when a Weave ConnectionRequest arrives.
+        let (new_session_tx, mut new_session_rx) =
+            tokio::sync::mpsc::unbounded_channel::<()>();
+
         let (outbound_tx, mut outbound_rx) =
             tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-
-        let (mut ours, theirs) = tokio::io::duplex(256 * 1024);
 
         // Time spent *inside* the WinRT write callback, accumulated rather than
         // logged per packet. This is the measurement that decides whether the
@@ -126,18 +148,14 @@ impl BleReceiverAdvertiser {
         // returns, and the UI shows a transfer stuck at whatever percentage it
         // reached - which is exactly what a dropped link looked like from the
         // app: the phone says "sent", we say nothing at all.
-        let (down_tx, mut down_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         // Carries the upgraded WiFi socket from the bandwidth-upgrade listener
         // back to the pump, which then splices it in place of the Weave
         // transport. TCP framing is byte-for-byte what `InboundRequest` already
         // reads off the duplex, so the swap needs no translation and the
         // encrypted stream - keys, sequence numbers - continues untouched.
-        let (upgrade_tx, mut upgrade_rx) =
-            tokio::sync::mpsc::unbounded_channel::<tokio::net::TcpStream>();
         // Separate from the socket itself: the socket arrives at
         // CLIENT_INTRODUCTION_ACK, but the stream may not move until
         // SAFE_TO_CLOSE_PRIOR_CHANNEL has gone out over BLE.
-        let (switch_tx, mut switch_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
         // Outbound Weave packets not yet confirmed by the peer.
         //
@@ -150,8 +168,53 @@ impl BleReceiverAdvertiser {
         let tx_pending = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let pump_pending = tx_pending.clone();
 
-        let msg_sender = self.sender.clone();
-        let ui_sender = self.sender.clone();
+        let session_sender = self.sender.clone();
+        let session_outbound_tx = outbound_tx.clone();
+
+        // Set when a session ends, so the advertiser drops the peer's GATT
+        // connection.
+        //
+        // The phone stays connected to our GATT server after a transfer -
+        // `subscribers = 1` never falls back to 0 - and while it does, our own
+        // attempt to connect *to* it as a client contends for the same link.
+        // Measured symmetrically: a receive then breaks the next send, a send
+        // breaks the next receive, and only restarting the app clears it.
+        // Disconnecting our client side (blea_send) covers one half; this is the
+        // other.
+        let recycle_adv = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let session_recycle = recycle_adv.clone();
+
+        // Supervisor: build a fresh session for every Weave connection.
+        tokio::spawn(async move {
+        while new_session_rx.recv().await.is_some() {
+            info!("{INNER_NAME}: new Weave connection, starting a fresh session");
+
+            let (inbound_tx, mut inbound_rx) =
+                tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+            let (down_tx, mut down_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+            let (upgrade_tx, mut upgrade_rx) =
+                tokio::sync::mpsc::unbounded_channel::<tokio::net::TcpStream>();
+            let (switch_tx, mut switch_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+            let (mut ours, theirs) = tokio::io::duplex(256 * 1024);
+
+            // Route the write handler at this session. The previous one's
+            // receiver is dropped with it, so anything still in flight for the
+            // old session is discarded rather than mixed into this one.
+            if let Ok(mut slot) = inbound_slot.lock() {
+                *slot = Some(inbound_tx);
+            }
+            if let Ok(mut slot) = down_slot.lock() {
+                *slot = Some(down_tx);
+            }
+
+            let outbound_tx = session_outbound_tx.clone();
+            let pump_us = pump_us.clone();
+            let pump_calls = pump_calls.clone();
+            let pump_pending = pump_pending.clone();
+            let msg_sender = session_sender.clone();
+            let ui_sender = session_sender.clone();
+            let end_recycle = session_recycle.clone();
+
         tokio::spawn(async move {
             let mut request =
                 super::InboundRequest::new(theirs, "ble".to_string(), msg_sender);
@@ -195,6 +258,9 @@ impl BleReceiverAdvertiser {
                     }
                 }
             }
+            // Drop the peer's GATT connection, so the next transfer - in either
+            // direction - starts from a clean link.
+            end_recycle.store(true, std::sync::atomic::Ordering::Relaxed);
         });
 
         // Pump: reassembled Weave messages in, framed replies out.
@@ -478,6 +544,8 @@ impl BleReceiverAdvertiser {
             }
             info!("{INNER_NAME}: bridge pump exited");
         });
+        }
+        });
 
         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {
             unsafe {
@@ -582,9 +650,13 @@ impl BleReceiverAdvertiser {
                     let n = s.SubscribedClients().and_then(|c| c.Size()).unwrap_or(0);
                     if n == 0 {
                         warn!("{INNER_NAME}: phone unsubscribed - BLE link dropped");
-                        // Unblock the bridge so the transfer fails visibly
-                        // instead of hanging.
-                        let _ = down_tx.send(());
+                        // Unblock the current session so the transfer fails
+                        // visibly instead of hanging.
+                        if let Ok(slot) = handler_down.lock() {
+                            if let Some(tx) = slot.as_ref() {
+                                let _ = tx.send(());
+                            }
+                        }
                     } else {
                         info!("{INNER_NAME}: server-tx subscribers = {n}");
                     }
@@ -754,11 +826,19 @@ impl BleReceiverAdvertiser {
                                 // nobody - silently dropping here reads exactly
                                 // like "the message never arrived", which is a
                                 // much harder bug.
-                                if let Err(e) = inbound_tx.send(msg) {
-                                    warn!(
-                                        "{INNER_NAME}: bridge is gone, dropping {} B Weave message",
+                                let sent = handler_inbound
+                                    .lock()
+                                    .ok()
+                                    .and_then(|s| s.as_ref().map(|tx| tx.send(msg)));
+                                match sent {
+                                    Some(Ok(())) => {}
+                                    Some(Err(e)) => warn!(
+                                        "{INNER_NAME}: session is gone, dropping {} B Weave message",
                                         e.0.len()
-                                    );
+                                    ),
+                                    None => warn!(
+                                        "{INNER_NAME}: no session yet, dropping a Weave message"
+                                    ),
                                 }
                             }
                         }
@@ -770,6 +850,16 @@ impl BleReceiverAdvertiser {
                     // hardcoding "data starts at 1".
                     if let Ok(mut st) = rx_buf.lock() {
                         st.expected = (((buf[0] >> 4) & 0x07) + 1) & 0x07;
+                        // A fresh connection: nothing from the last one belongs
+                        // in this one's reassembly.
+                        st.acc.clear();
+                        st.pending = Default::default();
+                    }
+
+                    // Command 0 = ConnectionRequest, i.e. a new Weave
+                    // connection. Build it a session of its own.
+                    if buf[0] & 0x0f == 0 {
+                        let _ = new_session_tx.send(());
                     }
                     info!(
                         "*** {INNER_NAME}: weave control {len} B: ctr={} cmd={} ({}) {:02x?} ***",
@@ -1009,6 +1099,31 @@ impl BleReceiverAdvertiser {
                         }
                     }
                 }
+                // A session ended: stop and restart advertising, which drops the
+                // peer's GATT connection. Without this the phone stays connected
+                // after a transfer and the *other* direction cannot get the link.
+                if recycle_adv.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                    let _ = provider.StopAdvertising();
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    match provider.StartAdvertisingWithParameters(&params) {
+                        Ok(()) => {
+                            // Did it actually drop? If subscribers is still 1
+                            // the recycle did not do what it is here to do, and
+                            // the next transfer in either direction will fight
+                            // for the link.
+                            let subs = server_tx
+                                .SubscribedClients()
+                                .and_then(|c| c.Size())
+                                .unwrap_or(0);
+                            info!(
+                                "{INNER_NAME}: recycled the advertisement; subscribers now {subs}"
+                            );
+                        }
+                        Err(e) => warn!("{INNER_NAME}: could not restart advertising: {e}"),
+                    }
+                    last_status = -1;
+                }
+
                 if let Ok(status) = provider.AdvertisementStatus() {
                     if status.0 != last_status {
                         last_status = status.0;

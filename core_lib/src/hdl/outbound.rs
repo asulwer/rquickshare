@@ -979,8 +979,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                         if let Err(e) = self.send_upgrade_path_request().await {
                             warn!("send_upgrade_path_request failed: {e}");
                         }
-                        if let Err(e) = self.offer_hotspot_upgrade().await {
-                            warn!("offer_hotspot_upgrade failed: {e}");
+                        // Off by default. Measured three ways: the peer never
+                        // offers an upgrade unprompted, ignores
+                        // UPGRADE_PATH_REQUEST, and ignores an offer we host -
+                        // the listener just times out. Meanwhile hosting one
+                        // drives the WiFi radio into AP mode for 45s on every
+                        // BLE send, for nothing. Kept behind a flag because the
+                        // code is correct and a different peer may accept.
+                        if std::env::var("RQS_TRY_SEND_UPGRADE").is_ok() {
+                            if let Err(e) = self.offer_hotspot_upgrade().await {
+                                warn!("offer_hotspot_upgrade failed: {e}");
+                            }
                         }
                     }
 
