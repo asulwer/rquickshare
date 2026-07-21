@@ -258,6 +258,15 @@ impl BleReceiverAdvertiser {
                     }
                 }
             }
+            // Let the peer finish its side before dropping the link.
+            //
+            // Recycling immediately cut the connection while the phone was still
+            // completing the transfer: the PC had the whole file and the phone
+            // sat on "sending" forever, because it never saw the end of the
+            // exchange. Our last frames are indications that can take seconds to
+            // confirm on this link, so the wait has to cover that rather than
+            // just the round trip.
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             // Drop the peer's GATT connection, so the next transfer - in either
             // direction - starts from a clean link.
             end_recycle.store(true, std::sync::atomic::Ordering::Relaxed);

@@ -698,6 +698,40 @@ best available one. Goal: support them all.
       fail immediately with an honest message, surfaced to the UI, rather than a
       confusing decode error and a hanging card.
 
+- [x] **Repeated transfers in both directions without restarting (2026-07-21).**
+      Four faults, each masking the next:
+
+      1. **The bridge was built once at startup.** When an `InboundRequest`
+         ended, the duplex and pump died with it, so every later BLE connection
+         got a Weave ConnectionConfirm and then talked to nobody. One failure
+         poisoned BLE receive until restart - which is why a restart only ever
+         bought one more attempt. It also leaked handshake state between
+         connections (`ClientInit` arriving at a request still in
+         `SentUkeyServerInit`). Now a Weave ConnectionRequest builds a fresh
+         session and the write handler routes into whichever is current.
+      2. **Neither side released the link.** The peer stays connected to our
+         GATT server after a transfer and we never disconnected our client
+         connection to it, so a transfer in one direction broke the next in the
+         other - symmetrically. Disconnect the peripheral when sending ends;
+         recycle the advertisement when a receive session ends.
+      3. **The recycle fired too early.** Dropping the link the moment
+         `InboundRequest` ended cut the phone off mid-completion: the PC had the
+         whole file and the phone sat on "sending" forever. 5s grace first. This
+         is a trade-off against (2) - that window is time the old connection is
+         still held.
+      4. **Cached peripheral handles go stale.** These are resolvable private
+         addresses that rotate every couple of minutes; once the peer moves, the
+         handle fails with "Not connected" though nothing is wrong with it.
+         Discovery only refreshes while scanning. A failed connect now rescans
+         once and matches by *name*, the only stable identity.
+
+      **The diagnostics did the work.** `peer already connected = false` killed
+      the contention theory in one line, and `peer accepted the Weave connection
+      then closed it without a word` correctly identified a phone that was
+      advertising but not on the receiving screen - which is a test-setup
+      requirement, not a bug: a phone accepts a connection only while actually
+      receiving.
+
 - [ ] **Outbound over BLE is capped at ~600 KB by the keepalive timeout.**
       The send loop in `outbound.rs` writes chunk after chunk and does not read
       from the socket until the whole file is done. Over TCP that is invisible;

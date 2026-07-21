@@ -95,7 +95,23 @@ pub async fn open_ble_by_address(address: &str) -> Result<BleChannel, anyhow::Er
         )
     })?;
 
-    open(peripheral).await
+    // Try the cached handle, then refresh once.
+    //
+    // Handles go stale: these addresses rotate every couple of minutes, and once
+    // the peer has moved the cached handle fails with "Not connected" even
+    // though the peer is present and healthy. Discovery only refreshes while it
+    // is running, which it is not once the user has stopped scanning - so a send
+    // shortly after a scan works and one a few minutes later does not.
+    match open(peripheral).await {
+        Ok(channel) => Ok(channel),
+        Err(first) => {
+            warn!("{INNER_NAME}: {first}; the handle may have gone stale, rescanning");
+            let fresh = super::refresh_peripheral(address)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("{first}"))?;
+            open(fresh).await
+        }
+    }
 }
 
 /// Connect, complete the Weave handshake as the client, and return the channel.

@@ -89,6 +89,75 @@ pub fn discovered_peripheral(address: &str) -> Option<btleplug::platform::Periph
         .and_then(|m| m.get(address).cloned())
 }
 
+/// The device name we listed this address under, if any.
+fn name_for_address(address: &str) -> Option<String> {
+    NAME_ADDRESSES.lock().ok().and_then(|n| {
+        n.iter()
+            .find(|(_, addrs)| addrs.iter().any(|a| a == address))
+            .map(|(name, _)| name.clone())
+    })
+}
+
+/// Scan briefly and return a *fresh* handle for whatever device was listed at
+/// `address`.
+///
+/// Handles go stale. These are resolvable private addresses that rotate every
+/// couple of minutes, and the handle we cached at discovery time stops working
+/// once the peer has moved - `connect()` then fails with "Not connected" even
+/// though nothing is wrong with the peer or the link. Discovery only refreshes
+/// while it is running, which it is not once the user has stopped scanning.
+///
+/// Matching is by *name*, because that is the only stable identity here - the
+/// address we were given is by definition the one that expired.
+pub async fn refresh_peripheral(address: &str) -> Option<btleplug::platform::Peripheral> {
+    use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter};
+    use btleplug::platform::Manager;
+
+    let wanted = name_for_address(address)?;
+    info!("{INNER_NAME}: refreshing a stale handle for {wanted}");
+
+    let manager = Manager::new().await.ok()?;
+    let adapter = manager.adapters().await.ok()?.into_iter().next()?;
+    adapter.start_scan(ScanFilter::default()).await.ok()?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+    let mut found = None;
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let Ok(peripherals) = adapter.peripherals().await else {
+            continue;
+        };
+        for p in peripherals {
+            let Ok(Some(props)) = p.properties().await else {
+                continue;
+            };
+            if !props.services.contains(&SERVICE_UUID_COPRESENCE) {
+                continue;
+            }
+            // Confirm it is the same device by reading its advertisement, the
+            // same way discovery identifies peers in the first place.
+            if let Some((name, _)) = read_peer_advertisement(&p).await {
+                if name == wanted {
+                    let addr = p.address().to_string();
+                    remember_peer(&name, &addr, &p);
+                    info!("{INNER_NAME}: {wanted} is now at {addr}");
+                    found = Some(p);
+                    break;
+                }
+            }
+        }
+        if found.is_some() {
+            break;
+        }
+    }
+
+    let _ = adapter.stop_scan().await;
+    if found.is_none() {
+        warn!("{INNER_NAME}: could not find {wanted} again; it may be out of range");
+    }
+    found
+}
+
 /// The copresence service a discoverable Quick Share receiver advertises.
 const SERVICE_UUID_COPRESENCE: Uuid = super::COPRESENCE_SERVICE_UUID;
 
