@@ -63,6 +63,8 @@ pub use hotspot_win::*;
 mod wifi_direct_win;
 #[cfg(all(feature = "experimental", target_os = "windows"))]
 pub use wifi_direct_win::*;
+mod frame_reader;
+pub use frame_reader::*;
 mod inbound;
 pub use inbound::*;
 pub(crate) mod info;

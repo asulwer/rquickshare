@@ -657,6 +657,47 @@ best available one. Goal: support them all.
       stack. `WithResponse` waits for the peer's ATT ack and is the only genuine
       backpressure on this path.
 
+- [x] **The phone's Quick Share *extension* drops WiFi when sending
+      (2026-07-21).** Confirmed by disabling and force-stopping it on the phone:
+      WiFi then stays up through a phone -> PC send. This is on the phone, not
+      the PC, and not caused by anything here.
+
+      **It distorted a lot of measurement.** With the extension active the phone
+      drops WiFi the moment the send card opens, so by the time its
+      ConnectionRequest arrives `mediums (raw)` has no `5` (WIFI_LAN) - even when
+      WiFi was on a second earlier. We therefore read the peer as having no
+      network, offered a soft-AP, and it had to join ours. Some of what looked
+      like BLE congestion (25s for the phone to join the hotspot, 15s for
+      LAST_WRITE_TO_PRIOR_CHANNEL) is the phone rebuilding its network underneath
+      the negotiation, not link contention.
+
+      With it disabled the peer keeps WIFI_LAN and the WIFI_LAN upgrade applies:
+      meet it on the network it is already on, no radio switching, no join.
+      **Test with it disabled** unless deliberately exercising the hotspot path.
+
+- [x] **The intermittent "Missing required fields" is a role mismatch, not
+      stream corruption (2026-07-21).** Labelling the error sites finally caught
+      it: `expected Introduction, got Response`, in state
+      `ReceivedPairedKeyResult`.
+
+      In the Nearby flow the *sender* sends PairedKeyEncryption ->
+      PairedKeyResult -> Introduction, and the *receiver* answers with Response.
+      A Response arriving here means the peer believed **it** was the receiver
+      and that we were sending - while the BLE bridge treats every incoming
+      connection as an inbound transfer and waits for an Introduction that never
+      comes.
+
+      Reproduced by: send PC -> phone (completed over LAN), then ~26s later press
+      send on the phone. It connects over BLE still believing it is the receiving
+      side of the earlier exchange. Restarting the app clears it.
+
+      This is why every framing theory failed - reassembly was always clean, and
+      the cancel-safety fix (real, and worth keeping) did not eliminate it.
+
+      **Still to do:** detect a `Response` as the first post-handshake frame and
+      fail immediately with an honest message, surfaced to the UI, rather than a
+      confusing decode error and a hanging card.
+
 - [ ] **Outbound over BLE is capped at ~600 KB by the keepalive timeout.**
       The send loop in `outbound.rs` writes chunk after chunk and does not read
       from the socket until the whole file is done. Over TCP that is invisible;

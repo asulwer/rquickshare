@@ -43,7 +43,7 @@ use crate::sharing_nearby::{
     TextMetadata,
 };
 use crate::utils::{
-    derive_d2d_keys, encode_point, gen_ecdsa_keypair, gen_random, stream_read_exact,
+    derive_d2d_keys, encode_point, gen_ecdsa_keypair, gen_random,
     to_four_digit_string, D2DKeys, DeviceType, RemoteDeviceInfo,
 };
 use crate::{location_nearby_connections, sharing_nearby};
@@ -66,14 +66,21 @@ pub enum OutboundPayload {
 #[derive(Debug)]
 pub struct OutboundRequest<S> {
     endpoint_id: [u8; 4],
-    socket: S,
+    /// Write half only; reading happens in a task. See `frame_reader`.
+    socket: tokio::io::WriteHalf<S>,
+    /// Frames off the wire, still encrypted.
+    ///
+    /// Decoupling reads from writes is what lets a long send answer keepalives:
+    /// the file loop can drain this between chunks instead of going silent for
+    /// the whole transfer.
+    frames: tokio::sync::mpsc::Receiver<crate::hdl::RawFrame>,
     pub state: InnerState,
     sender: Sender<ChannelMessage>,
     receiver: Receiver<ChannelMessage>,
     payload: OutboundPayload,
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
+impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
     pub fn new(
         endpoint_id: [u8; 4],
         socket: S,
@@ -88,9 +95,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
             OutboundPayload::Text(_) => None,
         };
 
+        let (reader, writer) = tokio::io::split(socket);
+        let frames = crate::hdl::spawn_frame_reader(reader, SANE_FRAME_LENGTH as usize);
+
         Self {
             endpoint_id,
-            socket,
+            socket: writer,
+            frames,
             state: InnerState {
                 id,
                 server_seq: 0,
@@ -112,9 +123,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
     }
 
     pub async fn handle(&mut self) -> Result<(), anyhow::Error> {
-        // Buffer for the 4-byte length
-        let mut length_buf = [0u8; 4];
-
         tokio::select! {
             i = self.receiver.recv() => {
                 match i {
@@ -150,28 +158,49 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
                     }
                 }
             },
-            h = stream_read_exact(&mut self.socket, &mut length_buf) => {
-                h?;
-
-                self._handle(length_buf).await?
+            // Both branches are channel receives, so both are cancel-safe.
+            frame = self.frames.recv() => {
+                match frame {
+                    Some(frame_data) => self._handle(frame_data).await?,
+                    None => return Err(anyhow!(std::io::Error::from(
+                        std::io::ErrorKind::UnexpectedEof
+                    ))),
+                }
             }
         }
 
         Ok(())
     }
 
-    pub async fn _handle(&mut self, length_buf: [u8; 4]) -> Result<(), anyhow::Error> {
-        let msg_length = u32::from_be_bytes(length_buf) as usize;
-        // Ensure the message length is not unreasonably big to avoid allocation attacks
-        if msg_length > SANE_FRAME_LENGTH as usize {
-            error!("Message length too big");
-            return Err(anyhow!("value"));
+    /// Handle any frame already waiting, without blocking.
+    ///
+    /// Called between file chunks. The send loop writes continuously and never
+    /// reads until the whole file is done, which over TCP is invisible but over
+    /// BLE means ~95s of silence for a 1.9 MB file - the peer sees no KeepAlive
+    /// response and closes at its 30s timeout, capping outbound at whatever
+    /// fits in 30s. Draining here keeps the connection alive without stalling
+    /// the send when there is nothing to read.
+    async fn service_pending_frames(&mut self) -> Result<(), anyhow::Error> {
+        loop {
+            match self.frames.try_recv() {
+                // Boxed to break a type-level cycle: this calls `_handle`,
+                // which can reach `process_consent`, which contains the send
+                // loop that calls back here. At runtime the frames arriving
+                // mid-send are keepalives and acks rather than consent frames,
+                // so it does not actually re-enter - but the compiler cannot
+                // know that and needs the indirection to size the future.
+                Ok(frame_data) => Box::pin(self._handle(frame_data)).await?,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return Ok(()),
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    return Err(anyhow!(std::io::Error::from(
+                        std::io::ErrorKind::UnexpectedEof
+                    )))
+                }
+            }
         }
+    }
 
-        // Allocate buffer for the actual message and read it
-        let mut frame_data = vec![0u8; msg_length];
-        stream_read_exact(&mut self.socket, &mut frame_data).await?;
-
+    pub async fn _handle(&mut self, frame_data: Vec<u8>) -> Result<(), anyhow::Error> {
         let current_state = &self.state;
         // Now determine what will be the request type based on current state
         match current_state.state {
@@ -846,6 +875,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin> OutboundRequest<S> {
 
                     // Loop until we reached end of file
                     loop {
+                        // Answer anything the peer has sent - KeepAlive above
+                        // all - before spending another chunk's worth of time
+                        // writing. Without this the peer hears nothing for the
+                        // whole transfer and closes at its 30s timeout.
+                        self.service_pending_frames().await?;
+
                         // Workaround to limit scope of the immutable borrow on self
                         let (curr_state, buffer, bytes_read) = {
                             let curr_state = match self.state.transferred_files.get(&current) {

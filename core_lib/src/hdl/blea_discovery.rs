@@ -198,6 +198,20 @@ impl BleDiscovery {
         // pile up duplicates in the UI.
         let mut seen: HashMap<String, ()> = HashMap::new();
 
+        // Give mDNS a head start.
+        //
+        // BLE advertisements arrive within a second; an mDNS service takes
+        // longer to resolve. Without this, BLE wins the race and the LAN
+        // suppression never fires, so a phone sitting on the same network gets
+        // offered as a BLE target - and the user picks the 20 KB/s path over the
+        // fast one. Measured: a PC->phone transfer went over BLE with both
+        // devices on WiFi, and the phone closed the connection a second later.
+        //
+        // Costs nothing when there is no LAN peer: advertisements repeat
+        // constantly, so anything skipped here is seen again immediately after.
+        let started = std::time::Instant::now();
+        const MDNS_HEAD_START: std::time::Duration = std::time::Duration::from_secs(4);
+
         loop {
             tokio::select! {
                 _ = ctk.cancelled() => {
@@ -244,6 +258,12 @@ impl BleDiscovery {
                         }
                         _ => continue,
                     };
+
+                    // Skip entirely - don't mark it seen - so the peer is
+                    // reconsidered once mDNS has had its chance.
+                    if started.elapsed() < MDNS_HEAD_START {
+                        continue;
+                    }
 
                     let peripheral = match self.adapter.peripheral(&id).await {
                         Ok(p) => p,

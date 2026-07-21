@@ -81,7 +81,12 @@ const SANITY_DURATION: Duration = Duration::from_micros(10);
 /// `tokio::net::TcpStream`.
 #[derive(Debug)]
 pub struct InboundRequest<S> {
-    socket: S,
+    /// Write half only. Reading happens in a separate task - see `frames` and
+    /// `frame_reader` for why.
+    socket: tokio::io::WriteHalf<S>,
+    /// Frames as they came off the wire, still encrypted. Fed by a reader task
+    /// so no read is ever cancelled by `select!`.
+    frames: tokio::sync::mpsc::Receiver<crate::hdl::RawFrame>,
     pub state: InnerState,
     sender: Sender<ChannelMessage>,
     receiver: Receiver<ChannelMessage>,
@@ -120,12 +125,17 @@ pub struct InboundRequest<S> {
     hotspot_creds: Option<crate::hdl::HotspotCredentials>,
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
+impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
     pub fn new(socket: S, id: String, sender: Sender<ChannelMessage>) -> Self {
         let receiver = sender.subscribe();
+        // Split so reads happen in their own task. See `frame_reader` - a read
+        // raced against the channel in `select!` loses bytes when cancelled.
+        let (reader, writer) = tokio::io::split(socket);
+        let frames = crate::hdl::spawn_frame_reader(reader, SANE_FRAME_LENGTH as usize);
 
         Self {
-            socket,
+            socket: writer,
+            frames,
             state: InnerState {
                 id,
                 server_seq: 0,
@@ -166,9 +176,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
     }
 
     pub async fn handle(&mut self) -> Result<(), anyhow::Error> {
-        // Buffer for the 4-byte length
-        let mut length_buf = [0u8; 4];
-
         tokio::select! {
             i = self.receiver.recv() => {
                 match i {
@@ -219,28 +226,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
                     }
                 }
             },
-            h = stream_read_exact(&mut self.socket, &mut length_buf) => {
-                h?;
-
-                self._handle(length_buf).await?
+            // Both branches are channel receives, and both are cancel-safe.
+            // Whichever loses simply hasn't consumed its message yet.
+            frame = self.frames.recv() => {
+                match frame {
+                    Some(frame_data) => self._handle(frame_data).await?,
+                    // The reader task ended: the transport is finished.
+                    None => return Err(anyhow!(std::io::Error::from(
+                        std::io::ErrorKind::UnexpectedEof
+                    ))),
+                }
             }
         }
 
         Ok(())
     }
 
-    pub async fn _handle(&mut self, length_buf: [u8; 4]) -> Result<(), anyhow::Error> {
-        let msg_length = u32::from_be_bytes(length_buf) as usize;
-        // Ensure the message length is not unreasonably big to avoid allocation attacks
-        if msg_length > SANE_FRAME_LENGTH as usize {
-            error!("Message length too big");
-            return Err(anyhow!("value"));
-        }
-
-        // Allocate buffer for the actual message and read it
-        let mut frame_data = vec![0u8; msg_length];
-        stream_read_exact(&mut self.socket, &mut frame_data).await?;
-
+    pub async fn _handle(&mut self, frame_data: Vec<u8>) -> Result<(), anyhow::Error> {
         let current_state = &self.state;
         // Now determine what will be the request type based on current state
         match current_state.state {
@@ -722,6 +724,142 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
         });
 
         Ok(())
+    }
+
+    /// Our IPv4 on the local network, for a WIFI_LAN upgrade offer.
+    ///
+    /// Skips loopback, link-local, and the 192.168.137.0/24 tethering subnet -
+    /// that one is our own soft-AP, which a peer already on the LAN cannot reach
+    /// and must not be told to use.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    fn lan_ipv4() -> Option<std::net::Ipv4Addr> {
+        get_if_addrs::get_if_addrs().ok()?.into_iter().find_map(|i| {
+            match i.ip() {
+                std::net::IpAddr::V4(v4)
+                    if !v4.is_loopback()
+                        && !v4.is_link_local()
+                        && !(v4.octets()[0] == 192
+                            && v4.octets()[1] == 168
+                            && v4.octets()[2] == 137) =>
+                {
+                    Some(v4)
+                }
+                _ => None,
+            }
+        })
+    }
+
+    /// Offer WIFI_LAN: the peer is already on our network, so just tell it where
+    /// to connect.
+    ///
+    /// This is the right upgrade for a phone that reached us over BLE while
+    /// having WiFi on - which happens, because we advertise as a receiver over
+    /// both mDNS and BLE and the phone picks. A hotspot is wrong there (it would
+    /// have to leave its network, which google/nearby refuses), but leaving it
+    /// on BLE means 20 KB/s and the ~1 MB indication-timeout wall. Nothing has
+    /// to be brought up: the network already exists.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    async fn offer_wifi_lan_upgrade(&mut self) -> Result<(), anyhow::Error> {
+        use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::{
+            upgrade_path_info::{Medium, WifiLanSocket},
+            EventType, UpgradePathInfo,
+        };
+        use crate::location_nearby_connections::BandwidthUpgradeNegotiationFrame;
+
+        let Some(ip) = Self::lan_ipv4() else {
+            warn!("Bandwidth upgrade: no LAN address to offer; staying on the prior channel");
+            return Ok(());
+        };
+
+        let port: u16 = 8899;
+        self.ensure_upgrade_listener(port).await;
+
+        let frame = OfflineFrame {
+            version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
+            v1: Some(location_nearby_connections::V1Frame {
+                r#type: Some(
+                    location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation
+                        .into(),
+                ),
+                bandwidth_upgrade_negotiation: Some(BandwidthUpgradeNegotiationFrame {
+                    event_type: Some(EventType::UpgradePathAvailable.into()),
+                    upgrade_path_info: Some(UpgradePathInfo {
+                        medium: Some(Medium::WifiLan.into()),
+                        wifi_lan_socket: Some(WifiLanSocket {
+                            // Network byte order, per the proto comment.
+                            ip_address: Some(ip.octets().to_vec()),
+                            wifi_port: Some(port as i32),
+                        }),
+                        supports_client_introduction_ack: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        };
+
+        self.encrypt_and_send(&frame).await?;
+        info!("Bandwidth upgrade: offered WIFI_LAN ({ip}:{port})");
+        Ok(())
+    }
+
+    /// Accept the upgraded channel on `port`, introduce it, and hand it to the
+    /// bridge. Shared by the hotspot and WIFI_LAN offers - only the medium and
+    /// credentials differ, never what happens once the peer connects.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    async fn ensure_upgrade_listener(&mut self, port: u16) {
+        let upgrade_tx = self.upgrade_tx.clone();
+        tokio::spawn(async move {
+            match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
+                Ok(l) => {
+                    info!("Bandwidth upgrade: listening on 0.0.0.0:{port}");
+                    let accepted = match tokio::time::timeout(
+                        std::time::Duration::from_secs(45),
+                        l.accept(),
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(_) => {
+                            warn!(
+                                "Bandwidth upgrade: no peer connected within 45s; staying on the \
+                                 prior channel"
+                            );
+                            return;
+                        }
+                    };
+                    match accepted {
+                        Ok((s, addr)) => {
+                            info!("*** Bandwidth upgrade: phone connected from {addr} ***");
+                            match introduce_upgraded_channel(s).await {
+                                Ok(sock) => match &upgrade_tx {
+                                    Some(tx) => {
+                                        if tx.send(sock).is_err() {
+                                            warn!(
+                                                "Bandwidth upgrade: nothing left to hand the \
+                                                 upgraded socket to"
+                                            );
+                                        }
+                                    }
+                                    None => warn!(
+                                        "Bandwidth upgrade: introduced, but this transport cannot \
+                                         adopt the upgraded socket"
+                                    ),
+                                },
+                                Err(e) => warn!("Bandwidth upgrade: introduction failed: {e}"),
+                            }
+                        }
+                        Err(e) => warn!("Bandwidth upgrade: accept failed: {e}"),
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => warn!(
+                    "Bandwidth upgrade: port {port} still held by a previous transfer; staying on \
+                     the prior channel"
+                ),
+                Err(e) => warn!("Bandwidth upgrade: bind failed: {e}"),
+            }
+        });
     }
 
     /// Bring up the Windows soft-AP and start accepting the upgraded channel,
@@ -1498,6 +1636,42 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
         &mut self,
         v1_frame: &sharing_nearby::V1Frame,
     ) -> Result<(), anyhow::Error> {
+        // A Response here means the peer thinks *it* is receiving.
+        //
+        // The sender drives PairedKeyEncryption -> PairedKeyResult ->
+        // Introduction; the receiver answers with Response. So a Response
+        // arriving where an Introduction belongs is a role mismatch, not a
+        // corrupt frame - the peer connected believing we were sending to it.
+        //
+        // Seen after a completed PC -> phone transfer, when the phone then
+        // connects over BLE still holding the earlier session's role. This
+        // handler can only receive, so there is nothing to salvage; say so
+        // plainly instead of failing with a confusing "missing field" and
+        // leaving the card hanging.
+        if v1_frame.r#type() == sharing_nearby::v1_frame::FrameType::Response {
+            warn!(
+                "Peer sent Response where an Introduction belongs: it believes it is the \
+                 receiver. Dropping the session so it can start a fresh one."
+            );
+            // Tell it to let go, so the stale role dies with this connection.
+            // Without this the peer keeps the role and every retry fails the
+            // same way until the *app* is restarted, which is what we saw.
+            if let Err(e) = self.disconnection().await {
+                debug!("Could not send disconnection to the confused peer: {e}");
+            }
+            self.update_state(
+                |e| {
+                    e.state = State::Disconnected;
+                },
+                true,
+            )
+            .await;
+            return Err(anyhow!(
+                "peer connected as a receiver, expecting us to send - it is still holding the \
+                 role from an earlier transfer. Nothing to receive here."
+            ));
+        }
+
         let introduction = v1_frame.introduction.as_ref().ok_or_else(|| {
             anyhow!(
                 "Missing required fields: expected Introduction, got {:?}",
@@ -1745,26 +1919,41 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
         // The WIFI_HOTSPOT-is-refused-on-WiFi-LAN objection doesn't apply here:
         // with the phone's WiFi off its ConnectionRequest omits WIFI_LAN, so
         // there is no WiFi-LAN connection for a hotspot to destroy.
-        if std::env::var("RQS_TRY_WIFI_DIRECT_UPGRADE").is_ok() {
+        // Only upgrade a transport that can actually be upgraded.
+        //
+        // `upgrade_tx` is set by the BLE bridge alone - it is the only transport
+        // that can swap the stream onto a new socket, and the only one slow
+        // enough to want to. Offering on a connection that is already TCP is
+        // both pointless and destructive: the peer took the offer, connected to
+        // our upgrade port, introduced itself, sent LAST_WRITE and moved to the
+        // new socket, while this request carried on reading the old one - the
+        // stream desynced and the next frame died with "SecureMessage.
+        // header_and_body: invalid wire type".
+        #[cfg(all(feature = "experimental", target_os = "windows"))]
+        let can_upgrade = self.upgrade_tx.is_some();
+        #[cfg(not(all(feature = "experimental", target_os = "windows")))]
+        let can_upgrade = false;
+
+        if !can_upgrade {
+            debug!("Bandwidth upgrade: transport cannot adopt an upgraded socket, not offering");
+        } else if std::env::var("RQS_TRY_WIFI_DIRECT_UPGRADE").is_ok() {
             if let Err(e) = self.offer_wifi_direct_upgrade().await {
                 warn!("offer_wifi_direct_upgrade failed: {}", e);
             }
         } else if self.peer_has_wifi_lan {
-            // Offering a soft-AP to a peer that already has a network asks it to
-            // leave that network, and google/nearby rejects WIFI_HOTSPOT
-            // outright while WIFI_LAN is up ("this will destroy WIFI_LAN").
-            // Measured: a phone with WiFi on completed the entire upgrade
-            // handshake - joined the AP, introduced itself, ACKed,
-            // LAST_WRITE/SAFE_TO_CLOSE - and then sent nothing on the new
-            // socket, hanging the transfer.
+            // The peer has a network, so offer to meet it there rather than
+            // asking it to join ours. A hotspot would mean leaving its own
+            // network, which google/nearby refuses ("this will destroy
+            // WIFI_LAN") - measured: such a phone completed the whole upgrade
+            // handshake and then sent nothing, hanging the transfer.
             //
-            // Nothing is lost by skipping it. A peer on WIFI_LAN either reached
-            // us over the network already, or can be reached that way, and
-            // either is faster than the BLE fallback this would upgrade from.
-            info!(
-                "Bandwidth upgrade: peer already has WIFI_LAN, not offering a hotspot it would \
-                 have to leave its network to join"
-            );
+            // Skipping the upgrade entirely was the first fix and was too blunt:
+            // a phone that has WiFi can still reach us over BLE (we advertise as
+            // a receiver on both, and it picks), and leaving that on BLE means
+            // 20 KB/s and the ~1 MB indication-timeout wall.
+            if let Err(e) = self.offer_wifi_lan_upgrade().await {
+                warn!("offer_wifi_lan_upgrade failed: {}", e);
+            }
         } else if let Err(e) = self.offer_wifi_hotspot_upgrade().await {
             warn!("offer_wifi_hotspot_upgrade failed: {}", e);
         }

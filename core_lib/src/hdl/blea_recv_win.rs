@@ -139,6 +139,17 @@ impl BleReceiverAdvertiser {
         // SAFE_TO_CLOSE_PRIOR_CHANNEL has gone out over BLE.
         let (switch_tx, mut switch_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
+        // Outbound Weave packets not yet confirmed by the peer.
+        //
+        // SAFE_TO_CLOSE_PRIOR_CHANNEL is the last thing we send over BLE, and
+        // the peer will not touch the new socket until it *receives* it. We were
+        // switching as soon as it was queued, but indications on this link take
+        // 10-30s to confirm - so the peer sat waiting for a frame still in our
+        // queue while the switch timer ran out and the transfer died with
+        // "nothing on the upgraded socket within 20s".
+        let tx_pending = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pump_pending = tx_pending.clone();
+
         let msg_sender = self.sender.clone();
         let ui_sender = self.sender.clone();
         tokio::spawn(async move {
@@ -300,6 +311,85 @@ impl BleReceiverAdvertiser {
                         // channel is finished with.
                         match upgraded.take() {
                             Some(mut sock) => {
+                                // First flush anything InboundRequest has
+                                // written but we have not pumped yet.
+                                //
+                                // SAFE_TO_CLOSE goes into the duplex, and the
+                                // switch is signalled on a *separate* channel
+                                // immediately afterwards - so the signal can
+                                // beat the bytes here. On a LAN upgrade, where
+                                // the whole exchange takes under a second, it
+                                // does: `prior channel drained` fired in the
+                                // same second as the connection because nothing
+                                // had been queued yet, we broke out of the pump,
+                                // and SAFE_TO_CLOSE was left unsent in the
+                                // duplex. The peer then waited forever for a
+                                // frame we still held.
+                                loop {
+                                    let mut buf = [0u8; 8192];
+                                    match tokio::time::timeout(
+                                        std::time::Duration::from_millis(200),
+                                        ours.read(&mut buf),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                                        Ok(Ok(n)) => pending.extend_from_slice(&buf[..n]),
+                                    }
+                                }
+                                while pending.len() >= 4 {
+                                    let len = u32::from_be_bytes([
+                                        pending[0], pending[1], pending[2], pending[3],
+                                    ]) as usize;
+                                    if pending.len() < 4 + len {
+                                        break;
+                                    }
+                                    let mut out = Vec::with_capacity(3 + 4 + len);
+                                    out.extend_from_slice(&[0xfc, 0x9f, 0x5e]);
+                                    out.extend_from_slice(&pending[..4 + len]);
+                                    pending.drain(..4 + len);
+                                    if outbound_tx.send(out).is_err() {
+                                        break;
+                                    }
+                                }
+
+                                // Then wait for it to actually reach the peer.
+                                // It is only queued at this point, and on a
+                                // congested BLE link that is tens of seconds
+                                // apart - the peer will not use the new socket
+                                // until it has it.
+                                // Let the sender thread pick the queue up before
+                                // asking whether it is empty: it publishes
+                                // `tx_pending` once per 50ms loop, so checking
+                                // immediately would read a stale 0 and "drain"
+                                // instantly - the same mistake in miniature.
+                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+                                // Give it a moment to go out, but do not wait on
+                                // confirmation.
+                                //
+                                // Waiting for the indication to be *confirmed*
+                                // stalls forever on the LAN path: once the peer
+                                // has the new socket it stops servicing BLE, so
+                                // that confirmation may never come. It is also
+                                // unnecessary - the sender thread drains its
+                                // queue independently of this pump, so once
+                                // SAFE_TO_CLOSE is queued it goes out whether we
+                                // are still here or not. Queueing it was the
+                                // part that was actually missing.
+                                let drain_deadline = std::time::Instant::now()
+                                    + std::time::Duration::from_secs(3);
+                                while pump_pending.load(std::sync::atomic::Ordering::Relaxed) > 0
+                                    && std::time::Instant::now() < drain_deadline
+                                {
+                                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                }
+                                info!(
+                                    "{INNER_NAME}: prior channel released ({} packet(s) still \
+                                     queued, the sender thread will finish them)",
+                                    pump_pending.load(std::sync::atomic::Ordering::Relaxed)
+                                );
+
                                 // Splice rather than translate: what the phone
                                 // writes here is already [u32 len][frame],
                                 // exactly what the far side of the duplex reads.
@@ -321,7 +411,7 @@ impl BleReceiverAdvertiser {
                                 // immediately.
                                 let mut first = [0u8; 8192];
                                 let n = match tokio::time::timeout(
-                                    std::time::Duration::from_secs(20),
+                                    std::time::Duration::from_secs(45),
                                     sock.read(&mut first),
                                 )
                                 .await
@@ -341,7 +431,7 @@ impl BleReceiverAdvertiser {
                                     Err(_) => {
                                         warn!(
                                             "{INNER_NAME}: nothing on the upgraded socket within \
-                                             20s; the peer completed the upgrade and went silent"
+                                             45s of the prior channel draining"
                                         );
                                         break;
                                     }
@@ -848,6 +938,14 @@ impl BleReceiverAdvertiser {
                         tx_queue.len()
                     );
                 }
+
+                // Publish what is still owed to the peer, so the bridge can wait
+                // for SAFE_TO_CLOSE to actually land before switching mediums.
+                tx_pending.store(
+                    tx_queue.len()
+                        + usize::from(in_flight.load(std::sync::atomic::Ordering::Relaxed)),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
 
                 // At most one indication outstanding. The completion handler
                 // clears the flag, so the next goes out only once the phone has
