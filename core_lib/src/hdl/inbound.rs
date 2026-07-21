@@ -2318,7 +2318,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
 /// still to build, so the phone will introduce itself, get its ACK, and then
 /// wait for a move that never comes. The transfer continues on WiFi-LAN.
 #[cfg(all(feature = "experimental", target_os = "windows"))]
-async fn introduce_upgraded_channel(
+pub(crate) async fn introduce_upgraded_channel(
     mut socket: tokio::net::TcpStream,
 ) -> Result<tokio::net::TcpStream, anyhow::Error> {
     use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::{

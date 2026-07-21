@@ -163,16 +163,20 @@ impl TcpServer {
         #[cfg(feature = "experimental")]
         if let Some(address) = si.addr.strip_prefix("ble:") {
             let address = address.to_string();
-            let stream = crate::hdl::open_ble_by_address(&address).await?;
+            let channel = crate::hdl::open_ble_by_address(&address).await?;
+            let (stream, upgrade_tx, switch_tx) =
+                (channel.stream, channel.upgrade_tx, channel.switch_tx);
             // 32 KB, not the default 512 KB. Nothing else happens while a chunk
             // is being written, and at ~20 KB/s a 512 KB chunk is ~25s - so
             // keepalives went unanswered until the peer closed at 30s, and
             // cancel was inert for the same 25s. 32 KB is ~1.6s.
-            return self.drive_outbound(ctk, si, stream, Some(32 * 1024)).await;
+            return self
+                .drive_outbound(ctk, si, stream, Some(32 * 1024), Some((upgrade_tx, switch_tx)))
+                .await;
         }
 
         let socket = TcpStream::connect(si.addr.clone()).await?;
-        self.drive_outbound(ctk, si, socket, None).await
+        self.drive_outbound(ctk, si, socket, None, None).await
     }
 
     /// The transport-independent half of `connect`: everything after a stream
@@ -183,6 +187,10 @@ impl TcpServer {
         si: SendInfo,
         stream: S,
         chunk_size: Option<usize>,
+        #[allow(unused_variables)] upgrade_sinks: Option<(
+            tokio::sync::mpsc::UnboundedSender<tokio::net::TcpStream>,
+            tokio::sync::mpsc::UnboundedSender<()>,
+        )>,
     ) -> Result<(), anyhow::Error>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -201,6 +209,10 @@ impl TcpServer {
 
         if let Some(n) = chunk_size {
             or.set_chunk_size(n);
+        }
+        #[cfg(all(feature = "experimental", target_os = "windows"))]
+        if let Some((upgrade_tx, switch_tx)) = upgrade_sinks {
+            or.set_upgrade_sinks(upgrade_tx, switch_tx);
         }
 
         // Send connection request

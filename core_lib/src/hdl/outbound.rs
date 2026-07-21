@@ -78,6 +78,17 @@ pub struct OutboundRequest<S> {
     sender: Sender<ChannelMessage>,
     receiver: Receiver<ChannelMessage>,
     payload: OutboundPayload,
+    /// Where the upgrade listener delivers the socket the peer connected on,
+    /// and the signal that the old channel has been released. Set by the BLE
+    /// send path, which is the only transport that can adopt an upgraded socket
+    /// and the only one slow enough to need to.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    upgrade_tx: Option<tokio::sync::mpsc::UnboundedSender<tokio::net::TcpStream>>,
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    switch_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+    /// Soft-AP hosted for the upgrade, held so it is torn down with the transfer.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    hotspot: Option<crate::hdl::WindowsHotspot>,
     /// How much file data goes into one payload chunk.
     ///
     /// This sets how often the send loop comes up for air, because nothing else
@@ -127,8 +138,26 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
             sender,
             receiver,
             payload,
+            #[cfg(all(feature = "experimental", target_os = "windows"))]
+            upgrade_tx: None,
+            #[cfg(all(feature = "experimental", target_os = "windows"))]
+            switch_tx: None,
+            #[cfg(all(feature = "experimental", target_os = "windows"))]
+            hotspot: None,
             chunk_size: 512 * 1024,
         }
+    }
+
+    /// Let this request upgrade off a slow transport. Only the BLE send path
+    /// can adopt an upgraded socket.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    pub fn set_upgrade_sinks(
+        &mut self,
+        upgrade_tx: tokio::sync::mpsc::UnboundedSender<tokio::net::TcpStream>,
+        switch_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    ) {
+        self.upgrade_tx = Some(upgrade_tx);
+        self.switch_tx = Some(switch_tx);
     }
 
     /// Use smaller payload chunks, for a transport where writing one takes long
@@ -615,9 +644,34 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                 // Whether it offers at all, and on which medium, decides the
                 // shape of that work - so record it before writing any.
                 info!(
-                    "Bandwidth upgrade offered by peer: {:?}",
+                    "Bandwidth upgrade: peer sent {:?}",
                     v1_frame.bandwidth_upgrade_negotiation
                 );
+
+                // The peer has finished with the old channel and is waiting for
+                // us to release it before using the new socket. Same exchange as
+                // the receive path, because hosting the medium puts us in the
+                // same role regardless of who is sending the file.
+                #[cfg(all(feature = "experimental", target_os = "windows"))]
+                {
+                    let is_last_write = v1_frame
+                        .bandwidth_upgrade_negotiation
+                        .as_ref()
+                        .map(|bun| {
+                            bun.event_type()
+                                == location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType::LastWriteToPriorChannel
+                        })
+                        .unwrap_or(false);
+                    if is_last_write {
+                        info!("Bandwidth upgrade: LAST_WRITE_TO_PRIOR_CHANNEL; releasing the old channel");
+                        if let Err(e) = self.send_safe_to_close_prior_channel().await {
+                            warn!("send_safe_to_close_prior_channel failed: {e}");
+                        }
+                        if let Some(tx) = &self.switch_tx {
+                            let _ = tx.send(());
+                        }
+                    }
+                }
             }
             location_nearby_connections::v1_frame::FrameType::Disconnection => {
                 // The remote device closed the session (normal after a transfer
@@ -919,8 +973,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                     // Only worth it where the transport is slow enough to care -
                     // `chunk_size` was lowered precisely because this one is.
                     if self.chunk_size < 512 * 1024 {
+                        // Ask, then offer. The request is free and the peer has
+                        // never answered one, but if it ever does we would
+                        // rather take its medium than host our own.
                         if let Err(e) = self.send_upgrade_path_request().await {
                             warn!("send_upgrade_path_request failed: {e}");
+                        }
+                        if let Err(e) = self.offer_hotspot_upgrade().await {
+                            warn!("offer_hotspot_upgrade failed: {e}");
                         }
                     }
 
@@ -1385,6 +1445,163 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
     /// Acting on it is the next piece of work and a different shape from the
     /// receive path: the peer would host the medium and we would have to *join*
     /// it, which on Windows means WlanConnect rather than tethering.
+    /// Host a soft-AP and offer it, so a send can leave BLE.
+    ///
+    /// We host rather than join because the peer will not offer anything: asked
+    /// directly with UPGRADE_PATH_REQUEST while receiving, it answers nothing,
+    /// and it never offers unprompted. The upgrade "server" is whoever hosts the
+    /// medium, not whoever sends the file, so hosting puts us in the same role
+    /// the receive path already handles - the peer connects, introduces itself,
+    /// sends LAST_WRITE, and we answer SAFE_TO_CLOSE.
+    ///
+    /// A hotspot rather than our LAN address: reaching this peer over BLE at all
+    /// means it had no network to be found on.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    async fn offer_hotspot_upgrade(&mut self) -> Result<(), anyhow::Error> {
+        use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::{
+            upgrade_path_info::{Medium, WifiHotspotCredentials},
+            EventType, UpgradePathInfo,
+        };
+        use crate::location_nearby_connections::BandwidthUpgradeNegotiationFrame;
+
+        let Some(upgrade_tx) = self.upgrade_tx.clone() else {
+            return Ok(());
+        };
+
+        let port: u16 = 8899;
+        let suffix: String = rand::rng()
+            .sample_iter(rand::distr::Alphanumeric)
+            .take(4)
+            .map(char::from)
+            .collect();
+        let ssid = format!("DIRECT-rq{suffix}");
+        let passphrase: String = rand::rng()
+            .sample_iter(rand::distr::Alphanumeric)
+            .take(12)
+            .map(char::from)
+            .collect();
+
+        // On a blocking thread: the WinRT tethering calls take seconds and
+        // stalling the executor breaks in-flight frames.
+        let (ssid_c, pass_c) = (ssid.clone(), passphrase.clone());
+        let (handle, creds) = match tokio::task::spawn_blocking(move || {
+            crate::hdl::WindowsHotspot::start(&ssid_c, &pass_c)
+        })
+        .await
+        {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                warn!("Bandwidth upgrade: hotspot start failed: {e}");
+                return Ok(());
+            }
+            Err(e) => {
+                warn!("Bandwidth upgrade: hotspot task join failed: {e}");
+                return Ok(());
+            }
+        };
+        info!(
+            "Bandwidth upgrade: hotspot up (ssid={}, gateway={}, port={})",
+            creds.ssid, creds.gateway, port
+        );
+        self.hotspot = Some(handle);
+
+        // Accept before offering: the peer acts on the frame immediately.
+        tokio::spawn(async move {
+            match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
+                Ok(l) => {
+                    info!("Bandwidth upgrade: listening on 0.0.0.0:{port}");
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(45),
+                        l.accept(),
+                    )
+                    .await
+                    {
+                        Ok(Ok((s, addr))) => {
+                            info!("*** Bandwidth upgrade: peer connected from {addr} ***");
+                            match crate::hdl::introduce_upgraded_channel(s).await {
+                                Ok(sock) => {
+                                    if upgrade_tx.send(sock).is_err() {
+                                        warn!("Bandwidth upgrade: nobody left to adopt the socket");
+                                    }
+                                }
+                                Err(e) => warn!("Bandwidth upgrade: introduction failed: {e}"),
+                            }
+                        }
+                        Ok(Err(e)) => warn!("Bandwidth upgrade: accept failed: {e}"),
+                        Err(_) => warn!(
+                            "Bandwidth upgrade: peer never joined the hotspot; staying on BLE"
+                        ),
+                    }
+                }
+                Err(e) => warn!("Bandwidth upgrade: bind failed: {e}"),
+            }
+        });
+
+        let frame = location_nearby_connections::OfflineFrame {
+            version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
+            v1: Some(location_nearby_connections::V1Frame {
+                r#type: Some(
+                    location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation
+                        .into(),
+                ),
+                bandwidth_upgrade_negotiation: Some(BandwidthUpgradeNegotiationFrame {
+                    event_type: Some(EventType::UpgradePathAvailable.into()),
+                    upgrade_path_info: Some(UpgradePathInfo {
+                        medium: Some(Medium::WifiHotspot.into()),
+                        wifi_hotspot_credentials: Some(WifiHotspotCredentials {
+                            ssid: Some(creds.ssid.clone()),
+                            password: Some(creds.passphrase.clone()),
+                            port: Some(port as i32),
+                            gateway: Some(creds.gateway.clone()),
+                            frequency: Some(-1),
+                        }),
+                        supports_client_introduction_ack: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        };
+
+        self.encrypt_and_send(&frame).await?;
+        info!(
+            "Bandwidth upgrade: offered WIFI_HOTSPOT (ssid={}, gateway={}, port={})",
+            creds.ssid, creds.gateway, port
+        );
+        Ok(())
+    }
+
+    #[cfg(not(all(feature = "experimental", target_os = "windows")))]
+    async fn offer_hotspot_upgrade(&mut self) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
+
+    /// Tell the peer the prior (BLE) channel may be closed. The last thing that
+    /// goes over it.
+    async fn send_safe_to_close_prior_channel(&mut self) -> Result<(), anyhow::Error> {
+        use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType;
+        use crate::location_nearby_connections::BandwidthUpgradeNegotiationFrame;
+
+        let frame = location_nearby_connections::OfflineFrame {
+            version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
+            v1: Some(location_nearby_connections::V1Frame {
+                r#type: Some(
+                    location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation
+                        .into(),
+                ),
+                bandwidth_upgrade_negotiation: Some(BandwidthUpgradeNegotiationFrame {
+                    event_type: Some(EventType::SafeToClosePriorChannel.into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        };
+        self.encrypt_and_send(&frame).await?;
+        info!("Bandwidth upgrade: sent SAFE_TO_CLOSE_PRIOR_CHANNEL");
+        Ok(())
+    }
+
     async fn send_upgrade_path_request(&mut self) -> Result<(), anyhow::Error> {
         use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType;
         use crate::location_nearby_connections::BandwidthUpgradeNegotiationFrame;
