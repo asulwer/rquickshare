@@ -53,7 +53,7 @@ type HmacSha256 = Hmac<Sha256>;
 const SANE_FRAME_LENGTH: i32 = 5 * 1024 * 1024;
 const SANITY_DURATION: Duration = Duration::from_micros(10);
 
-#[derive(Debug, Deserialize, Serialize, TS)]
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
 #[ts(export)]
 pub enum OutboundPayload {
     Files(Vec<String>),
@@ -89,6 +89,10 @@ pub struct OutboundRequest<S> {
     /// Soft-AP hosted for the upgrade, held so it is torn down with the transfer.
     #[cfg(all(feature = "experimental", target_os = "windows"))]
     hotspot: Option<crate::hdl::WindowsHotspot>,
+    /// Set once the stream has moved onto an upgraded (WiFi) socket, so the
+    /// send loop stops waiting for one and proceeds.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    upgraded: bool,
     /// How much file data goes into one payload chunk.
     ///
     /// This sets how often the send loop comes up for air, because nothing else
@@ -144,6 +148,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
             switch_tx: None,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
             hotspot: None,
+            #[cfg(all(feature = "experimental", target_os = "windows"))]
+            upgraded: false,
             chunk_size: 512 * 1024,
         }
     }
@@ -340,7 +346,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                         }
                         .serialize(),
                     ),
-                    mediums: vec![Medium::WifiLan.into()],
+                    // Declare what we can actually host.
+                    //
+                    // This claimed WIFI_LAN only, so a WIFI_HOTSPOT offer landed
+                    // outside the negotiated set and the peer ignored it - which
+                    // is the likeliest reason a hosted hotspot was never joined.
+                    // Only claim it on the slow transport, where we really will
+                    // bring one up; on TCP it would be a medium we never offer.
+                    mediums: if self.chunk_size < 512 * 1024 {
+                        vec![Medium::WifiHotspot.into(), Medium::WifiLan.into()]
+                    } else {
+                        vec![Medium::WifiLan.into()]
+                    },
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -632,6 +649,25 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                 trace!("Sending keepalive");
                 self.send_keepalive(true).await?;
             }
+            location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeRetry => {
+                info!(
+                    "Received BandwidthUpgradeRetry: {:?}",
+                    v1_frame.bandwidth_upgrade_retry
+                );
+                // Answer with what we support.
+                //
+                // The peer announces its mediums and waits for ours before
+                // choosing one - the receive path has done this for a while, the
+                // send path never did. With no answer the phone's negotiated set
+                // collapsed to WIFI_LAN alone
+                // ("2.4GHz Mediums: [WIFI_LAN]"), which it then could not host
+                // with WiFi off: "failed to start listening for incoming Wifi
+                // connections", retrying every 32s forever. WIFI_HOTSPOT never
+                // entered consideration, so our offer was never weighed.
+                if let Err(e) = self.send_supported_mediums().await {
+                    warn!("send_supported_mediums failed: {e}");
+                }
+            }
             location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation => {
                 // Log only, for now. Sending over BLE is stuck at ~20 KB/s and
                 // will hit the same ~1 MB indication-timeout wall the receive
@@ -648,6 +684,30 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                     v1_frame.bandwidth_upgrade_negotiation
                 );
 
+                // The peer is hosting a medium and has given us credentials.
+                //
+                // This is the direction that actually works: with WiFi off the
+                // phone still brings up its own AP (192.168.49.1, the standard
+                // Android P2P gateway) and offers it - it just needed to see
+                // WIFI_HOTSPOT in the negotiated set, which it did not until we
+                // started answering BandwidthUpgradeRetry. So we join rather
+                // than host.
+                #[cfg(all(feature = "experimental", target_os = "windows"))]
+                if let Some(creds) = v1_frame
+                    .bandwidth_upgrade_negotiation
+                    .as_ref()
+                    .filter(|bun| {
+                        bun.event_type()
+                            == location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType::UpgradePathAvailable
+                    })
+                    .and_then(|bun| bun.upgrade_path_info.as_ref())
+                    .and_then(|info| info.wifi_hotspot_credentials.clone())
+                {
+                    if let Err(e) = self.join_peer_hotspot(creds).await {
+                        warn!("Bandwidth upgrade: could not take the peer's medium: {e}");
+                    }
+                }
+
                 // The peer has finished with the old channel and is waiting for
                 // us to release it before using the new socket. Same exchange as
                 // the receive path, because hosting the medium puts us in the
@@ -663,6 +723,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                         })
                         .unwrap_or(false);
                     if is_last_write {
+                        // Only reachable if we host, which as the sender we no
+                        // longer do. Kept because the frame is legal and
+                        // answering it costs nothing.
                         info!("Bandwidth upgrade: LAST_WRITE_TO_PRIOR_CHANNEL; releasing the old channel");
                         if let Err(e) = self.send_safe_to_close_prior_channel().await {
                             warn!("send_safe_to_close_prior_channel failed: {e}");
@@ -670,6 +733,38 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                         if let Some(tx) = &self.switch_tx {
                             let _ = tx.send(());
                         }
+                    }
+
+                    // The peer hosts and has released the old channel - this is
+                    // the answer to the LAST_WRITE we sent after joining its AP.
+                    // The switch happens here and not a moment earlier: moving
+                    // the stream before the old channel is released is what hung
+                    // the receive path.
+                    let is_safe_to_close = v1_frame
+                        .bandwidth_upgrade_negotiation
+                        .as_ref()
+                        .map(|bun| {
+                            bun.event_type()
+                                == location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType::SafeToClosePriorChannel
+                        })
+                        .unwrap_or(false);
+                    if is_safe_to_close {
+                        info!("Bandwidth upgrade: peer released the prior channel; switching");
+                        if let Some(tx) = &self.switch_tx {
+                            let _ = tx.send(());
+                        }
+                        // The send loop's head-start window can now proceed, over
+                        // the new medium.
+                        self.upgraded = true;
+                        // Back to large chunks. 32 KB was chosen so a BLE write
+                        // couldn't monopolise the loop for 25s; on WiFi that
+                        // small size caps us at ~40 KB/s, because the per-chunk
+                        // fixed cost (encrypt, UI update, keepalive service)
+                        // dominates - roughly one chunk a second regardless of
+                        // link speed. A 512 KB chunk amortises that overhead
+                        // ~16x.
+                        self.chunk_size = 512 * 1024;
+                        info!("Bandwidth upgrade: raised chunk size to 512 KB for the fast medium");
                     }
                 }
             }
@@ -947,9 +1042,61 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                     return Ok(());
                 }
 
+                // Give a bandwidth upgrade a head start before flooding the
+                // link with file data.
+                //
+                // Over BLE the upgrade is several round trips - retry, our
+                // supported-mediums reply, the peer's offer, join, introduce -
+                // and every one competes with our data chunks for a ~20 KB/s
+                // link. Blasting a 158 MB file from offset 0 starved the
+                // negotiation so it never happened, and the whole transfer
+                // crawled over BLE. Wait a bounded window here, servicing
+                // inbound frames (which is what drives the upgrade and honours a
+                // cancel), and start sending only once the medium has switched
+                // or the window elapses. Transparent either way: the switch
+                // swaps the socket under the same duplex, so the file loop below
+                // runs over WiFi without knowing.
+                #[cfg(all(feature = "experimental", target_os = "windows"))]
+                if self.upgrade_tx.is_some() {
+                    info!("Giving a bandwidth upgrade a head start before sending file data");
+                    // Drive it, don't just wait for it.
+                    //
+                    // The phone offers a path only after we answer its
+                    // BandwidthUpgradeRetry, and that exchange does not always
+                    // finish on its own within the window - some runs upgraded in
+                    // seconds, others never offered and fell to BLE at 3 KB/s.
+                    // Prompt it: announce our mediums and ask for a path up front,
+                    // then re-ask periodically until it offers or the window ends.
+                    let _ = self.send_supported_mediums().await;
+                    let _ = self.send_upgrade_path_request().await;
+
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_secs(30);
+                    let mut last_nudge = std::time::Instant::now();
+                    while std::time::Instant::now() < deadline && !self.upgraded {
+                        self.service_pending_frames().await?;
+                        if last_nudge.elapsed() >= std::time::Duration::from_secs(6) {
+                            let _ = self.send_upgrade_path_request().await;
+                            last_nudge = std::time::Instant::now();
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                    if self.upgraded {
+                        info!("Bandwidth upgrade completed; sending file data over the new medium");
+                    } else {
+                        info!("No upgrade within the window; sending file data over BLE");
+                    }
+                }
+
                 let ids: Vec<i64> = self.state.transferred_files.keys().cloned().collect();
                 info!("We are sending: {:?}", ids);
                 let mut ids_iter = ids.into_iter();
+                // Throughput, reported every 5s. The only way to tell "the
+                // switch happened but the data path is slow" from "the link
+                // itself is slow" without external tools - the previous crawl
+                // over WiFi (ping to the AP was clean) needed exactly this.
+                let mut tp_bytes: u64 = 0;
+                let mut tp_last = std::time::Instant::now();
                 // Loop through all files
                 loop {
                     let current = match ids_iter.next() {
@@ -972,20 +1119,37 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                     // Ask for a faster medium before committing to a long send.
                     // Only worth it where the transport is slow enough to care -
                     // `chunk_size` was lowered precisely because this one is.
-                    if self.chunk_size < 512 * 1024 {
+                    // `!self.upgraded` is essential, not just an optimisation.
+                    // Once switched, this socket carries encrypted payload; a
+                    // negotiation frame injected into that stream is garbage to
+                    // the peer, which stops reading - the socket fills, our write
+                    // blocks forever, and the transfer dies with a broken pipe
+                    // having sent zero bytes. This ran on every file because
+                    // chunk_size stays small after the upgrade.
+                    #[cfg(all(feature = "experimental", target_os = "windows"))]
+                    let want_upgrade = self.chunk_size < 512 * 1024 && !self.upgraded;
+                    #[cfg(not(all(feature = "experimental", target_os = "windows")))]
+                    let want_upgrade = self.chunk_size < 512 * 1024;
+                    if want_upgrade {
                         // Ask, then offer. The request is free and the peer has
                         // never answered one, but if it ever does we would
                         // rather take its medium than host our own.
                         if let Err(e) = self.send_upgrade_path_request().await {
                             warn!("send_upgrade_path_request failed: {e}");
                         }
-                        // Off by default. Measured three ways: the peer never
-                        // offers an upgrade unprompted, ignores
-                        // UPGRADE_PATH_REQUEST, and ignores an offer we host -
-                        // the listener just times out. Meanwhile hosting one
-                        // drives the WiFi radio into AP mode for 45s on every
-                        // BLE send, for nothing. Kept behind a flag because the
-                        // code is correct and a different peer may accept.
+                        // Deliberately no hotspot of our own here.
+                        //
+                        // The *receiver* hosts the upgrade medium and the sender
+                        // joins it - that is Nearby's model, the receiver being
+                        // the connection's server. Confirmed both ways: when the
+                        // PC receives it hosts at 192.168.137.1 and the phone
+                        // joins; when the phone receives it hosts at
+                        // 192.168.49.1 and offers us the credentials. Hosting as
+                        // the sender was simply the wrong role, which is why the
+                        // peer never took it - it had already decided it was
+                        // hosting. See `join_peer_hotspot`, which takes its
+                        // offer instead. RQS_TRY_SEND_UPGRADE=1 restores the old
+                        // behaviour for experiments.
                         if std::env::var("RQS_TRY_SEND_UPGRADE").is_ok() {
                             if let Err(e) = self.offer_hotspot_upgrade().await {
                                 warn!("offer_hotspot_upgrade failed: {e}");
@@ -1000,6 +1164,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                         // writing. Without this the peer hears nothing for the
                         // whole transfer and closes at its 30s timeout.
                         self.service_pending_frames().await?;
+
+                        let tp_elapsed = tp_last.elapsed();
+                        if tp_elapsed >= std::time::Duration::from_secs(5) {
+                            info!(
+                                "Send throughput: {:.0} KB/s",
+                                tp_bytes as f64 / 1024.0 / tp_elapsed.as_secs_f64()
+                            );
+                            tp_bytes = 0;
+                            tp_last = std::time::Instant::now();
+                        }
 
                         // Workaround to limit scope of the immutable borrow on self
                         let (curr_state, buffer, bytes_read) = {
@@ -1042,6 +1216,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                             )
                         };
 
+                        tp_bytes += bytes_read as u64;
                         let sending_buffer = buffer[..bytes_read].to_vec();
                         info!(
                             "> File ready: {bytes_read} bytes && {} && left to send: {} with current offset: {}",
@@ -1583,6 +1758,182 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
 
     #[cfg(not(all(feature = "experimental", target_os = "windows")))]
     async fn offer_hotspot_upgrade(&mut self) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
+
+    /// Join the AP the peer is hosting, introduce ourselves on it, and hand the
+    /// socket to the transport.
+    ///
+    /// We are the *client* of the new medium here, the reverse of the receive
+    /// path: we send CLIENT_INTRODUCTION and wait for the ACK, rather than
+    /// answering one. After that we tell the peer we are done with the old
+    /// channel and wait for it to release it.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    async fn join_peer_hotspot(
+        &mut self,
+        creds: crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::upgrade_path_info::WifiHotspotCredentials,
+    ) -> Result<(), anyhow::Error> {
+        use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::{
+            ClientIntroduction, EventType,
+        };
+        use crate::location_nearby_connections::BandwidthUpgradeNegotiationFrame;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let Some(upgrade_tx) = self.upgrade_tx.clone() else {
+            return Ok(());
+        };
+        let (Some(ssid), Some(password)) = (creds.ssid.clone(), creds.password.clone()) else {
+            return Err(anyhow!("peer offered a hotspot with no credentials"));
+        };
+        let gateway = creds.gateway().to_string();
+        let port = creds.port() as u16;
+
+        info!("Bandwidth upgrade: joining the peer's network {ssid}");
+        crate::hdl::join(&ssid, &password).await?;
+
+        // Association is not addressing. ConnectAsync returns as soon as the
+        // link is up, but DHCP from the peer's AP takes a further moment, and
+        // connecting before we hold an address on its subnet has no route to
+        // the gateway - it just hangs. Measured: "timed out connecting to
+        // 192.168.49.1" two seconds after a successful join.
+        if let Ok(gw) = gateway.parse::<std::net::Ipv4Addr>() {
+            if crate::hdl::wait_for_route(gw, std::time::Duration::from_secs(20)).await {
+                info!("Bandwidth upgrade: hold an address on the peer's subnet");
+            } else {
+                warn!(
+                    "Bandwidth upgrade: no address on the peer's subnet after 20s; trying anyway"
+                );
+            }
+        }
+        info!("Bandwidth upgrade: connecting to {gateway}:{port}");
+
+        // Retry: the AP can accept the association a beat before its listener is
+        // ready, so a single refused connect is not conclusive.
+        let mut socket = {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                let why = match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    tokio::net::TcpStream::connect(format!("{gateway}:{port}")),
+                )
+                .await
+                {
+                    Ok(Ok(s)) => break s,
+                    Ok(Err(e)) => e.to_string(),
+                    Err(_) => "connect timed out".to_string(),
+                };
+                if std::time::Instant::now() >= deadline {
+                    return Err(anyhow!(
+                        "could not reach {gateway}:{port} after joining: {why}"
+                    ));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        };
+
+        // Introduce ourselves. The peer expects this as the first frame on the
+        // upgraded channel and answers with CLIENT_INTRODUCTION_ACK.
+        let intro = location_nearby_connections::OfflineFrame {
+            version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
+            v1: Some(location_nearby_connections::V1Frame {
+                r#type: Some(
+                    location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation
+                        .into(),
+                ),
+                bandwidth_upgrade_negotiation: Some(BandwidthUpgradeNegotiationFrame {
+                    event_type: Some(EventType::ClientIntroduction.into()),
+                    client_introduction: Some(ClientIntroduction {
+                        endpoint_id: Some(
+                            String::from_utf8_lossy(&self.endpoint_id).to_string(),
+                        ),
+                        supports_disabling_encryption: Some(false),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        };
+        let data = intro.encode_to_vec();
+        socket.write_all(&(data.len() as u32).to_be_bytes()).await?;
+        socket.write_all(&data).await?;
+        socket.flush().await?;
+        info!("Bandwidth upgrade: sent CLIENT_INTRODUCTION");
+
+        // Wait for the ACK before abandoning the old channel.
+        let mut len_buf = [0u8; 4];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            socket.read_exact(&mut len_buf),
+        )
+        .await
+        .map_err(|_| anyhow!("timed out waiting for CLIENT_INTRODUCTION_ACK"))??;
+        let len = u32::from_be_bytes(len_buf) as usize;
+        if len == 0 || len > SANE_FRAME_LENGTH as usize {
+            return Err(anyhow!("insane ack frame length {len}"));
+        }
+        let mut frame = vec![0u8; len];
+        socket.read_exact(&mut frame).await?;
+        info!("Bandwidth upgrade: got CLIENT_INTRODUCTION_ACK");
+
+        // Hand the socket over; the transport holds it until the old channel is
+        // released.
+        if upgrade_tx.send(socket).is_err() {
+            return Err(anyhow!("transport is gone, cannot adopt the upgraded socket"));
+        }
+
+        // Tell the peer we are finished with the old channel. It answers
+        // SAFE_TO_CLOSE_PRIOR_CHANNEL, which is what fires the switch.
+        let last_write = location_nearby_connections::OfflineFrame {
+            version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
+            v1: Some(location_nearby_connections::V1Frame {
+                r#type: Some(
+                    location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation
+                        .into(),
+                ),
+                bandwidth_upgrade_negotiation: Some(BandwidthUpgradeNegotiationFrame {
+                    event_type: Some(EventType::LastWriteToPriorChannel.into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        };
+        self.encrypt_and_send(&last_write).await?;
+        info!("Bandwidth upgrade: sent LAST_WRITE_TO_PRIOR_CHANNEL");
+        Ok(())
+    }
+
+    /// Tell the peer which upgrade mediums we support.
+    ///
+    /// WIFI_HOTSPOT first: over BLE the peer has no network, so the only medium
+    /// either side can bring up is an access point. Whether *it* hosts one and
+    /// we join, or it takes the one we host, both need this in the negotiated
+    /// set - and without an answer here the set collapses to WIFI_LAN, which a
+    /// phone with WiFi off cannot host.
+    async fn send_supported_mediums(&mut self) -> Result<(), anyhow::Error> {
+        use crate::location_nearby_connections::bandwidth_upgrade_retry_frame::Medium;
+        use crate::location_nearby_connections::BandwidthUpgradeRetryFrame;
+
+        let mediums = if self.chunk_size < 512 * 1024 {
+            vec![Medium::WifiHotspot.into(), Medium::WifiLan.into()]
+        } else {
+            vec![Medium::WifiLan.into()]
+        };
+
+        let frame = location_nearby_connections::OfflineFrame {
+            version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
+            v1: Some(location_nearby_connections::V1Frame {
+                r#type: Some(
+                    location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeRetry.into(),
+                ),
+                bandwidth_upgrade_retry: Some(BandwidthUpgradeRetryFrame {
+                    supported_medium: mediums,
+                    is_request: Some(false),
+                }),
+                ..Default::default()
+            }),
+        };
+        self.encrypt_and_send(&frame).await?;
+        info!("Bandwidth upgrade: replied with our supported mediums");
         Ok(())
     }
 

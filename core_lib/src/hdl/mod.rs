@@ -54,6 +54,11 @@ pub use blea_discovery::*;
 // reachable". BLE did: over the BLE socket the phone's ConnectionRequest omits
 // WIFI_LAN entirely (its WiFi is off) and advertises WIFI_HOTSPOT, so the
 // objection that removed this no longer applies. Restored verbatim.
+// Joining a peer's AP, for when the *phone* hosts the upgrade medium.
+#[cfg(all(feature = "experimental", target_os = "windows"))]
+mod wifi_join_win;
+#[cfg(all(feature = "experimental", target_os = "windows"))]
+pub use wifi_join_win::*;
 #[cfg(all(feature = "experimental", target_os = "windows"))]
 mod hotspot_win;
 #[cfg(all(feature = "experimental", target_os = "windows"))]

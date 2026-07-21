@@ -28,7 +28,7 @@ fn normalize_addr(addr: SocketAddr) -> SocketAddr {
 
 const INNER_NAME: &str = "TcpServer";
 
-#[derive(Debug, Deserialize, Serialize, TS)]
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
 #[ts(export)]
 pub struct SendInfo {
     pub id: String,
@@ -170,6 +170,15 @@ impl TcpServer {
             // is being written, and at ~20 KB/s a 512 KB chunk is ~25s - so
             // keepalives went unanswered until the peer closed at 30s, and
             // cancel was inert for the same 25s. 32 KB is ~1.6s.
+            //
+            // NB: the first BLE outbound after launch tends to die in the
+            // handshake and a manual re-send works. An automatic retry was
+            // tried and reverted - it reconnected without disconnecting first,
+            // so each retry hit an already-open Weave connection, timed out over
+            // 10s, and rescanned for a phone that (being connected to us) was no
+            // longer advertising, cascading into a shutdown hang. If retried
+            // again it must disconnect the peripheral between attempts and not
+            // block shutdown.
             return self
                 .drive_outbound(ctk, si, stream, Some(32 * 1024), Some((upgrade_tx, switch_tx)))
                 .await;
@@ -243,7 +252,7 @@ impl TcpServer {
                                 // nothing shown at all.
                                 if or.state.state != State::Finished && or.state.state != State::Cancelled {
                                     let _ = self.sender.clone().send(ChannelMessage {
-                                        id: si.addr,
+                                        id: si.addr.clone(),
                                         direction: ChannelDirection::LibToFront,
                                         state: Some(State::Disconnected),
                                         ..Default::default()

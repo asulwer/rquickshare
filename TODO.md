@@ -755,12 +755,68 @@ best available one. Goal: support them all.
       frame per call in a caller-owned loop, so it interleaves naturally. Only
       the send side has this problem.
 
-- [ ] **No bandwidth upgrade when we are the sender.** Measured: the phone never
-      sends UPGRADE_PATH_AVAILABLE when it is the receiver - there is not one in
-      a full WiFi-off transfer, and `outbound.rs` now logs any that arrives. So
-      we would have to ask with UPGRADE_PATH_REQUEST and then *join* whatever it
-      proposes, which on Windows means `WlanConnect` rather than the tethering
-      the receive path uses. Until then outbound stays at BLE speed.
+- [ ] **No bandwidth upgrade when we are the sender — and the earlier diagnosis
+      was WRONG (corrected 2026-07-21).**
+
+      This was recorded four times as "a phone acting as receiver will not
+      upgrade", inferred from silence after we offered. Its own logcat says
+      otherwise:
+
+      ```text
+      BandwidthUpgradeManager is attempting to upgrade endpoint 1Fr0 with a new
+        bandwidth upgrade medium WIFI_LAN.
+      E: WifiLanBandwidthUpgradeMedium couldn't initiate the WIFI_LAN upgrade
+        because it failed to start listening for incoming Wifi connections
+      [BandwidthUpgradeProtocol] Reset BandwidthUpgradeState because we have
+        tried on all mediums.
+      Retry bandwidth upgrade after 32000 ms
+      ```
+
+      **The phone wants to be the host.** It picks WIFI_LAN, tries to listen for
+      incoming connections, fails because its WiFi is off, and retries the same
+      medium every 32s forever. It never evaluates our UPGRADE_PATH_AVAILABLE
+      because it is not looking for one - it is driving its own upgrade.
+
+      **And its medium set collapses to one entry:**
+      `[BandwidthUpgradeState] 6GHz: [], 5GHz: [], 2.4GHz: [WIFI_LAN]` - so
+      WIFI_HOTSPOT is never considered, even though both sides list it elsewhere
+      (`upgradeMediums:[USB, WIFI_LAN, WIFI_DIRECT, WIFI_AWARE, WIFI_HOTSPOT,
+      ...]`). Why the negotiation narrows to WIFI_LAN alone is the thing to
+      attack; the offer itself is not the problem.
+
+      **RESOLVED (2026-07-21).** The phone hosts when it receives; we join. Added
+      `wifi_join_win.rs` (WiFiAdapter client), act on the phone's
+      UPGRADE_PATH_AVAILABLE by joining its AP at 192.168.49.1 and introducing
+      ourselves as the client. Key fixes along the way: answer
+      BandwidthUpgradeRetry on the send path so WIFI_HOTSPOT enters the
+      negotiated set (it collapsed to WIFI_LAN without it); a head-start window
+      that *drives* the upgrade (announce mediums + request path, re-nudge)
+      rather than waiting; don't re-send UPGRADE_PATH_REQUEST after switching
+      (it poisoned the payload stream); wait for a DHCP address on the peer's
+      subnet before connecting; carry the partial frame across the switch; and
+      **raise the payload chunk from 32 KB to 512 KB once upgraded** - that was
+      the throughput fix, 40 KB/s -> 2-5 MB/s.
+
+      Known-open: a still-unexplained default route (0.0.0.0 via 192.168.49.1)
+      is installed when we join the phone's AP - harmless with Ethernet holding
+      the real route, but it should be suppressed. And the first BLE outbound
+      after launch tends to fail the handshake; a manual re-send works. An
+      auto-retry was tried and reverted (it cascaded into a shutdown hang);
+      a correct one must disconnect between attempts.
+
+      **Historical threads (now moot):**
+      1. Why does the set collapse to `[WIFI_LAN]`? Our ConnectionRequest now
+         declares `[WIFI_HOTSPOT, WIFI_LAN]`, so the intersection should be
+         wider. Check whether the declaration is reaching it, and what else
+         feeds that set (MediumRole? supported_wifi_direct_auth_types?).
+      2. Will it ever take the *client* role, or does it always insist on
+         hosting? If it always hosts, then PC -> phone with WiFi off cannot
+         upgrade at all - the phone cannot host without WiFi - and the honest
+         answer is that this case stays on BLE.
+
+      **Lesson:** "peer ignored it" is not a measurement. Four rounds were spent
+      on that inference before anyone read the peer's own log, which named the
+      cause in one line.
 
 - [x] **Bandwidth upgrade to WIFI_HOTSPOT over the BLE channel: WORKING
       (2026-07-20).** A file sent from a phone with WiFi **off** now arrives over

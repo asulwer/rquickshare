@@ -323,6 +323,28 @@ pub async fn open(peripheral: Peripheral) -> Result<BleChannel, anyhow::Error> {
                     match upgraded.take() {
                         Some(mut sock) => {
                             info!("{INNER_NAME}: switching the stream onto the upgraded socket");
+
+                            // Carry anything half-read across.
+                            //
+                            // `pending` holds bytes taken off the duplex that
+                            // have not yet formed a whole frame. Dropping them
+                            // here loses the middle of the stream: the peer sits
+                            // waiting for the rest of a frame that no longer
+                            // exists, which is a transfer that stalls partway
+                            // with the sender believing it sent everything.
+                            if !pending.is_empty() {
+                                info!(
+                                    "{INNER_NAME}: carrying {} B of partial frame onto the \
+                                     upgraded socket",
+                                    pending.len()
+                                );
+                                if let Err(e) = sock.write_all(&pending).await {
+                                    warn!("{INNER_NAME}: could not carry the partial frame: {e}");
+                                    return;
+                                }
+                                pending.clear();
+                            }
+
                             // Rejoin the halves: TCP framing is exactly what is
                             // already flowing, so nothing needs translating.
                             let mut joined = tokio::io::join(far_rd, far_wr);
