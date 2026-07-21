@@ -183,6 +183,13 @@ pub async fn open(peripheral: Peripheral) -> Result<BleChannel, anyhow::Error> {
     // way, so progress and "finished" mean something. See the git history - a
     // 256 KB buffer let OutboundRequest report Finished in one second while the
     // radio was minutes behind.
+    // 16 KB, and measured to be the sweet spot (2026-07-21). Tried larger both
+    // ways - 1 MB chunks and a 256 KB duplex - and both were *slower* over the
+    // upgraded WiFi link, not faster. The small duplex keeps OutboundRequest
+    // tightly coupled to actual send progress, so data streams smoothly in
+    // TCP-sized pieces rather than in bursts; it is also what keeps "Finished"
+    // honest on BLE-only transfers. Don't enlarge this without a measurement
+    // showing it helps.
     let (near, far) = tokio::io::duplex(16 * 1024);
 
     let (upgrade_tx, mut upgrade_rx) =
@@ -344,6 +351,18 @@ pub async fn open(peripheral: Peripheral) -> Result<BleChannel, anyhow::Error> {
                                 }
                                 pending.clear();
                             }
+
+                            // Do NOT close BLE here - it strands the transfer.
+                            //
+                            // Tried it on the theory that the phone waits for the
+                            // weave socket to disconnect; the opposite happened.
+                            // Closing BLE right after the switch tore the phone's
+                            // weave socket down (its "onDisconnected callback"
+                            // fires, then a GATT connection timeout) and it never
+                            // started reading the WiFi socket - the transfer
+                            // froze at exactly the bytes BLE had delivered
+                            // (98 KB). The runs that completed at 6 MB/s kept BLE
+                            // open. Leave it; it is dropped at pump end as usual.
 
                             // Rejoin the halves: TCP framing is exactly what is
                             // already flowing, so nothing needs translating.

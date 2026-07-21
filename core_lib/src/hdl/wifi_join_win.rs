@@ -44,23 +44,34 @@ pub async fn join(ssid: &str, password: &str) -> Result<(), anyhow::Error> {
                 return Err(anyhow::anyhow!("no WiFi adapter"));
             }
             let adapter = adapters.GetAt(0)?;
-
-            // Scan first: a freshly created AP will not be in a stale report.
-            adapter.ScanAsync()?.get()?;
-
-            let networks = adapter.NetworkReport()?.AvailableNetworks()?;
             let wanted = HSTRING::from(ssid.as_str());
-            let mut found = None;
-            for i in 0..networks.Size()? {
-                let n = networks.GetAt(i)?;
-                if n.Ssid()? == wanted {
-                    found = Some(n);
-                    break;
+
+            // Scan repeatedly. A just-created WiFi-Direct group owner does not
+            // appear in the first scan - measured: "network DIRECT-52-... was
+            // not found", a single scan giving up too early and dropping the
+            // whole transfer back to BLE. Retry for ~30s.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let network = loop {
+                adapter.ScanAsync()?.get()?;
+                let networks = adapter.NetworkReport()?.AvailableNetworks()?;
+                let mut found = None;
+                for i in 0..networks.Size()? {
+                    let n = networks.GetAt(i)?;
+                    if n.Ssid()? == wanted {
+                        found = Some(n);
+                        break;
+                    }
                 }
-            }
-            let network = found.ok_or_else(|| {
-                anyhow::anyhow!("peer's network {ssid} was not found in the scan")
-            })?;
+                if let Some(n) = found {
+                    break n;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(anyhow::anyhow!(
+                        "peer's network {ssid} never appeared in a scan"
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            };
 
             let credential = PasswordCredential::new()?;
             credential.SetPassword(&HSTRING::from(password.as_str()))?;
@@ -88,6 +99,27 @@ pub async fn join(ssid: &str, password: &str) -> Result<(), anyhow::Error> {
     // stalling it here would break the in-flight frames on the old channel.
     let outcome = tokio::task::spawn_blocking(move || rx.recv()).await??;
     outcome.map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Disconnect the WiFi adapter from whatever it joined.
+///
+/// Called when a transfer ends. Without it the PC stays associated to the
+/// phone's transfer-scoped AP - which also installs a default route that would
+/// blackhole the PC's traffic through a phone that has no internet.
+pub async fn wifi_disconnect() {
+    let _ = tokio::task::spawn_blocking(|| {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+        if let Ok(adapters) = WiFiAdapter::FindAllAdaptersAsync().and_then(|op| op.get()) {
+            for i in 0..adapters.Size().unwrap_or(0) {
+                if let Ok(adapter) = adapters.GetAt(i) {
+                    adapter.Disconnect().ok();
+                }
+            }
+        }
+    })
+    .await;
 }
 
 /// Wait until an interface holds an address on the same /24 as `gateway`.

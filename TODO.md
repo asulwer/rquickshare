@@ -797,12 +797,26 @@ best available one. Goal: support them all.
       **raise the payload chunk from 32 KB to 512 KB once upgraded** - that was
       the throughput fix, 40 KB/s -> 2-5 MB/s.
 
-      Known-open: a still-unexplained default route (0.0.0.0 via 192.168.49.1)
-      is installed when we join the phone's AP - harmless with Ethernet holding
-      the real route, but it should be suppressed. And the first BLE outbound
-      after launch tends to fail the handshake; a manual re-send works. An
-      auto-retry was tried and reverted (it cascaded into a shutdown hang);
-      a correct one must disconnect between attempts.
+      **STATUS (end of 2026-07-21): parked behind `RQS_SEND_WIFI_UPGRADE`,
+      three of four cases solid.** The send-side upgrade *works* - 6 MB/s over
+      the phone's 5GHz AP, event-driven join (background task, stream BLE
+      meanwhile, switch on the event, no fixed fallback timer) - but is not
+      reliable, from four independent intermittent causes:
+        1. First BLE connection after launch fails the UKEY2 handshake; a
+           re-send works. Auto-retry was tried and reverted (shutdown hang).
+        2. The phone's WiFi-Direct GO isn't in the first WiFi scan; now retried
+           for 30s.
+        3. After the switch the phone intermittently doesn't drain the WiFi
+           socket (froze at 98 KB / ~4.5 MiB). Closing BLE at the switch made it
+           worse and was reverted.
+        4. WiFi/BLE coexistence drags the pre-switch BLE phase to ~3 KB/s.
+      Off by default: PC -> phone with WiFi off streams over BLE - slow for big
+      files, reliable. Set `RQS_SEND_WIFI_UPGRADE=1` to try it. The 5GHz
+      medium_metadata, the event-driven join, and all correctness fixes stay.
+
+      Also still open: joining the phone's AP installs a default route
+      (0.0.0.0 via 192.168.49.1) - harmless with Ethernet holding the real
+      route, but should be suppressed.
 
       **Historical threads (now moot):**
       1. Why does the set collapse to `[WIFI_LAN]`? Our ConnectionRequest now
