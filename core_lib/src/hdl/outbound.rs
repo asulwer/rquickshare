@@ -78,6 +78,14 @@ pub struct OutboundRequest<S> {
     sender: Sender<ChannelMessage>,
     receiver: Receiver<ChannelMessage>,
     payload: OutboundPayload,
+    /// How much file data goes into one payload chunk.
+    ///
+    /// This sets how often the send loop comes up for air, because nothing else
+    /// happens while a chunk is being written. At 512 KB over BLE that is ~25s
+    /// at 20 KB/s - so keepalives went unanswered until the peer closed at its
+    /// 30s timeout, and the cancel button did nothing for the same 25s. Over TCP
+    /// a chunk is milliseconds and none of it matters.
+    chunk_size: usize,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
@@ -119,7 +127,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
             sender,
             receiver,
             payload,
+            chunk_size: 512 * 1024,
         }
+    }
+
+    /// Use smaller payload chunks, for a transport where writing one takes long
+    /// enough to matter. See `chunk_size`.
+    pub fn set_chunk_size(&mut self, chunk_size: usize) {
+        info!("Using {chunk_size} B payload chunks");
+        self.chunk_size = chunk_size;
     }
 
     pub async fn handle(&mut self) -> Result<(), anyhow::Error> {
@@ -181,6 +197,32 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
     /// fits in 30s. Draining here keeps the connection alive without stalling
     /// the send when there is nothing to read.
     async fn service_pending_frames(&mut self) -> Result<(), anyhow::Error> {
+        // Honour a cancel from the UI first.
+        //
+        // `handle()` watches this channel, but a send never returns to
+        // `handle()` until the whole file is done - so over a slow medium the
+        // cancel button did nothing for minutes. Three presses were logged
+        // against a transfer that was already wedged, with no effect.
+        while let Ok(channel_msg) = self.receiver.try_recv() {
+            if channel_msg.direction == ChannelDirection::LibToFront
+                || channel_msg.id != self.state.id
+            {
+                continue;
+            }
+            if let Some(ChannelAction::CancelTransfer) = channel_msg.action {
+                info!("Cancelling the transfer at the user's request");
+                self.update_state(
+                    |e| {
+                        e.state = State::Cancelled;
+                    },
+                    true,
+                )
+                .await;
+                self.disconnection().await?;
+                return Err(anyhow!(crate::errors::AppError::NotAnError));
+            }
+        }
+
         loop {
             match self.frames.try_recv() {
                 // Boxed to break a type-level cycle: this calls `_handle`,
@@ -873,6 +915,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                         }
                     };
 
+                    // Ask for a faster medium before committing to a long send.
+                    // Only worth it where the transport is slow enough to care -
+                    // `chunk_size` was lowered precisely because this one is.
+                    if self.chunk_size < 512 * 1024 {
+                        if let Err(e) = self.send_upgrade_path_request().await {
+                            warn!("send_upgrade_path_request failed: {e}");
+                        }
+                    }
+
                     // Loop until we reached end of file
                     loop {
                         // Answer anything the peer has sent - KeepAlive above
@@ -906,7 +957,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                                 break;
                             }
 
-                            let mut buffer = vec![0u8; 512 * 1024];
+                            let mut buffer = vec![0u8; self.chunk_size];
                             let bytes_read = curr_state.file.as_ref().unwrap().read(&mut buffer)?;
 
                             (
@@ -1320,6 +1371,41 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
 
         self.send_frame(smsg.encode_to_vec()).await?;
 
+        Ok(())
+    }
+
+    /// Ask the peer to offer us a faster medium.
+    ///
+    /// Sending is stuck at BLE speed because the upgrade is the server's to
+    /// initiate, and when we send, the *phone* is the server - it offers
+    /// nothing, and a full WiFi-off transfer contains no UPGRADE_PATH_AVAILABLE
+    /// at all. UPGRADE_PATH_REQUEST is the frame that asks it to.
+    ///
+    /// Whatever comes back is logged by the BandwidthUpgradeNegotiation arm.
+    /// Acting on it is the next piece of work and a different shape from the
+    /// receive path: the peer would host the medium and we would have to *join*
+    /// it, which on Windows means WlanConnect rather than tethering.
+    async fn send_upgrade_path_request(&mut self) -> Result<(), anyhow::Error> {
+        use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType;
+        use crate::location_nearby_connections::BandwidthUpgradeNegotiationFrame;
+
+        let frame = location_nearby_connections::OfflineFrame {
+            version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
+            v1: Some(location_nearby_connections::V1Frame {
+                r#type: Some(
+                    location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation
+                        .into(),
+                ),
+                bandwidth_upgrade_negotiation: Some(BandwidthUpgradeNegotiationFrame {
+                    event_type: Some(EventType::UpgradePathRequest.into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        };
+
+        self.encrypt_and_send(&frame).await?;
+        info!("Bandwidth upgrade: asked the peer for an upgrade path");
         Ok(())
     }
 

@@ -164,11 +164,15 @@ impl TcpServer {
         if let Some(address) = si.addr.strip_prefix("ble:") {
             let address = address.to_string();
             let stream = crate::hdl::open_ble_by_address(&address).await?;
-            return self.drive_outbound(ctk, si, stream).await;
+            // 32 KB, not the default 512 KB. Nothing else happens while a chunk
+            // is being written, and at ~20 KB/s a 512 KB chunk is ~25s - so
+            // keepalives went unanswered until the peer closed at 30s, and
+            // cancel was inert for the same 25s. 32 KB is ~1.6s.
+            return self.drive_outbound(ctk, si, stream, Some(32 * 1024)).await;
         }
 
         let socket = TcpStream::connect(si.addr.clone()).await?;
-        self.drive_outbound(ctk, si, socket).await
+        self.drive_outbound(ctk, si, socket, None).await
     }
 
     /// The transport-independent half of `connect`: everything after a stream
@@ -178,6 +182,7 @@ impl TcpServer {
         ctk: CancellationToken,
         si: SendInfo,
         stream: S,
+        chunk_size: Option<usize>,
     ) -> Result<(), anyhow::Error>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -193,6 +198,10 @@ impl TcpServer {
                 name: si.name,
             },
         );
+
+        if let Some(n) = chunk_size {
+            or.set_chunk_size(n);
+        }
 
         // Send connection request
         or.send_connection_request().await?;
@@ -210,10 +219,16 @@ impl TcpServer {
                         match e.downcast_ref() {
                             Some(AppError::NotAnError) => break,
                             None => {
-                                if or.state.state == State::Initial {
-                                    break;
-                                }
-
+                                // Report a failure in State::Initial too.
+                                //
+                                // Staying quiet is right for the *inbound*
+                                // server, where a peer that connects and says
+                                // nothing is a port scanner. Here the user
+                                // pressed send, so silence is the worst
+                                // outcome: a peer that accepts the connection
+                                // and then closes - a phone advertising Nearby
+                                // but not on the receiving screen - failed with
+                                // nothing shown at all.
                                 if or.state.state != State::Finished && or.state.state != State::Cancelled {
                                     let _ = self.sender.clone().send(ChannelMessage {
                                         id: si.addr,

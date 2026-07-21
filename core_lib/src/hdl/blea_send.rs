@@ -197,6 +197,17 @@ pub async fn open(peripheral: Peripheral) -> Result<tokio::io::DuplexStream, any
     let peer_hash = std::sync::Arc::new(std::sync::Mutex::new(NEARBY_SHARING_HASH));
     let rx_hash = peer_hash.clone();
 
+    // Cleared when the peer closes, so the sender stops instead of writing into
+    // a dead connection.
+    //
+    // The two pumps were independent: when the peer closed, the inbound pump
+    // ended but the outbound one stayed blocked in a write-with-response that
+    // will never be acknowledged. OutboundRequest then blocked on a full duplex
+    // and the transfer hung with no error - and the UI's cancel could not reach
+    // it either.
+    let alive = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let rx_alive = alive.clone();
+
     // Outbound: OutboundRequest -> duplex -> [hash][len][frame] -> Weave packets.
     let tx_peripheral = peripheral.clone();
     let tx_char = client_tx.clone();
@@ -236,6 +247,11 @@ pub async fn open(peripheral: Peripheral) -> Result<tokio::io::DuplexStream, any
                 break;
             }
 
+            if !alive.load(std::sync::atomic::Ordering::Relaxed) {
+                warn!("{INNER_NAME}: peer is gone, abandoning the rest of the transfer");
+                break;
+            }
+
             let mut frame = vec![0u8; len];
             if far_rd.read_exact(&mut frame).await.is_err() {
                 break;
@@ -265,6 +281,13 @@ pub async fn open(peripheral: Peripheral) -> Result<tokio::io::DuplexStream, any
     tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
         let mut acc: Vec<u8> = Vec::new();
+        // Did the peer ever say anything? A Quick Share receiver answers our
+        // multiplex ConnectionRequest with a data frame. A peer that completes
+        // the Weave handshake and then closes without a word is advertising
+        // 0xFEF3 as general Nearby presence but has no receiver session behind
+        // it - i.e. it is not on the receiving screen. That is not a protocol
+        // failure and should not be reported as one.
+        let mut heard_from_peer = false;
 
         while let Some(n) = notifications.next().await {
             if n.uuid != BLE_SOCKET_SERVER_TX_UUID || n.value.is_empty() {
@@ -323,11 +346,23 @@ pub async fn open(peripheral: Peripheral) -> Result<tokio::io::DuplexStream, any
                 }
             }
 
+            heard_from_peer = true;
             if far_wr.write_all(&msg[3..]).await.is_err() {
                 break;
             }
         }
-        info!("{INNER_NAME}: inbound pump ended");
+        // Stop the sender: it is otherwise blocked on an acknowledgement that
+        // can never arrive.
+        rx_alive.store(false, std::sync::atomic::Ordering::Relaxed);
+
+        if heard_from_peer {
+            info!("{INNER_NAME}: inbound pump ended");
+        } else {
+            warn!(
+                "{INNER_NAME}: peer accepted the Weave connection then closed it without a word - \
+                 it is advertising Nearby but is not on the Quick Share receiving screen"
+            );
+        }
     });
 
     Ok(near)
@@ -367,9 +402,22 @@ async fn send_weave(
         // A write request waits for the peer's ATT acknowledgement, which is the
         // only real flow control available here - every buffer upstream of this
         // was a symptom, not the cause.
-        peripheral
-            .write(characteristic, &pkt, WriteType::WithResponse)
-            .await?;
+        // Bounded as a backstop. A write-with-response to a peer that has gone
+        // away can otherwise wait indefinitely, which is how a dead connection
+        // turned into a hung transfer that even cancel could not reach.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            peripheral.write(characteristic, &pkt, WriteType::WithResponse),
+        )
+        .await
+        {
+            Ok(r) => r?,
+            Err(_) => {
+                return Err(anyhow::anyhow!(
+                    "peer did not acknowledge a write within 20s; treating the link as dead"
+                ))
+            }
+        }
     }
     Ok(())
 }
