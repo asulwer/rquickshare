@@ -6,7 +6,7 @@ resolver = "2"
 # `version.workspace = true`, and tauri.conf.json reads it from
 # app/main/src-tauri/Cargo.toml.
 [workspace.package]
-version = "0.12.1"
+version = "0.12.2"
 
 # Profiles must live at the workspace root (per-crate profiles are ignored).
 [profile.release]
