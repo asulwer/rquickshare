@@ -3,6 +3,31 @@
 Tracks work on this fork: transport mediums, completed features, and parked
 items. Check items off (`[x]`) as they land; for parked items, note why.
 
+## Known issues
+
+- [ ] **First-connection BLE handshake flakiness** — the one open defect after
+      the 2026-07-22 bandwidth-upgrade work. Two forms, both self-recovering on
+      a retry:
+        - The first BLE connection after launch fails the UKEY2 handshake; a
+          re-send works.
+        - The first inbound (phone -> PC) after an outbound send ends in state
+          `Initial` without a ConnectionRequest - the peer opens the BLE socket
+          and closes it without speaking.
+      Pre-existing, not introduced by the upgrade work, so it is documented
+      rather than blocking the merge. Slated for its own branch.
+
+      An auto-retry was tried and reverted: it reconnected without disconnecting
+      first, hit an already-open Weave connection, timed out over 10s, rescanned
+      for a phone that was no longer advertising, and cascaded into a shutdown
+      hang. A retry must disconnect the peripheral between attempts and must not
+      block shutdown.
+
+      What is available now that was not when this was last attacked: the
+      per-frame `send_frame` trace, the `mux out` trace with Weave counters, and
+      the receive-side byte dump. The missing capture is a logcat of a *failing
+      first connection* alongside those traces - every capture so far has been of
+      the retry that succeeded.
+
 ## Transport mediums
 
 rquickshare currently supports only **WiFi LAN**. Quick Share (Nearby
@@ -40,11 +65,43 @@ best available one. Goal: support them all.
       same way rules out the phone: it's the network not routing IPv6 between
       clients, or Android not accepting inbound IPv6. New hardware will not
       change this — only a different network would, so stop retesting it.
-- [ ] **WiFi Direct** — peer-to-peer WiFi link. **This is the only bandwidth
-      upgrade an Android phone will accept from a WiFi-LAN connection, so it is
-      the priority** (it was previously deprioritized in favour of Hotspot — that
-      was backwards; see the Hotspot entry for the proof). Protocol spec in
+- [ ] **WiFi Direct** — peer-to-peer WiFi link. Protocol spec in
       `docs/wifi-direct.md`.
+
+      **NOT IMPLEMENTED, deliberately (2026-07-22). Do not start on this
+      without reading why.**
+
+      Hosting works: `wifi_direct_win.rs` brings up an autonomous group owner
+      (the `IsAutonomousGroupOwnerEnabled` fix below). What does not work is the
+      *peer joining* our group, and the failure is not graceful — it leaves the
+      phone's P2P state wedged at `[2]BUSY` until the Nearby stack restarts,
+      which then breaks unrelated transfers (see the testing gotcha below). A
+      medium whose failure mode degrades the peer's radio is worse than no
+      medium.
+
+      It also has nothing left to do. WIFI_HOTSPOT covers every case, measured
+      end to end — see the Hotspot entry's status table. WiFi Direct and
+      WIFI_HOTSPOT are both ordinary 802.11 links with identical PHY rates;
+      there is no speed to be gained. The difference is only in how the peer
+      associates: a hotspot is a plain SSID/password soft-AP joined with
+      standard station APIs, while WiFi Direct needs P2P discovery and
+      group-owner negotiation through `WifiP2pManager`.
+
+      The code stays in the tree, env-gated and *not advertised* — the receive
+      path claims only WIFI_HOTSPOT in its supported-medium set, because
+      claiming a medium we will not offer invites the peer to negotiate one we
+      then never provide.
+
+      **Revisit it only if one of these becomes true:**
+        - A peer refuses WIFI_HOTSPOT but accepts WIFI_DIRECT. Nothing observed
+          so far does; the Pixel lists both and picks whichever we offer.
+        - The PC is WiFi-only rather than on Ethernet. Windows Mobile Hotspot
+          takes the WiFi adapter, so hosting one costs a WiFi-only machine its
+          own network connection. A P2P group can in principle run alongside an
+          existing station connection, which is the one genuine architectural
+          advantage WiFi Direct has here.
+        - The `[2]BUSY` join failure is understood and fixed. Until then every
+          offer is a liability, not a fallback.
 
       **TESTING GOTCHA — read first, it will waste your afternoon otherwise.**
       A failed WiFi Direct upgrade **wedges the phone's Nearby stack**. After it,
@@ -797,26 +854,56 @@ best available one. Goal: support them all.
       **raise the payload chunk from 32 KB to 512 KB once upgraded** - that was
       the throughput fix, 40 KB/s -> 2-5 MB/s.
 
-      **STATUS (end of 2026-07-21): parked behind `RQS_SEND_WIFI_UPGRADE`,
-      three of four cases solid.** The send-side upgrade *works* - 6 MB/s over
-      the phone's 5GHz AP, event-driven join (background task, stream BLE
-      meanwhile, switch on the event, no fixed fallback timer) - but is not
-      reliable, from four independent intermittent causes:
-        1. First BLE connection after launch fails the UKEY2 handshake; a
-           re-send works. Auto-retry was tried and reverted (shutdown hang).
-        2. The phone's WiFi-Direct GO isn't in the first WiFi scan; now retried
-           for 30s.
-        3. After the switch the phone intermittently doesn't drain the WiFi
-           socket (froze at 98 KB / ~4.5 MiB). Closing BLE at the switch made it
-           worse and was reverted.
-        4. WiFi/BLE coexistence drags the pre-switch BLE phase to ~3 KB/s.
-      Off by default: PC -> phone with WiFi off streams over BLE - slow for big
-      files, reliable. Set `RQS_SEND_WIFI_UPGRADE=1` to try it. The 5GHz
-      medium_metadata, the event-driven join, and all correctness fixes stay.
+      **STATUS (end of 2026-07-22): on by default, all four cases working.**
+      The env gate is gone. Measured end to end:
 
-      Also still open: joining the phone's AP installs a default route
-      (0.0.0.0 via 192.168.49.1) - harmless with Ethernet holding the real
-      route, but should be suppressed.
+      | phone WiFi | direction   | medium                        |
+      | ---------- | ----------- | ----------------------------- |
+      | on         | PC -> phone | WIFI_LAN, ~5.3 MB/s           |
+      | on         | phone -> PC | WIFI_LAN, ~3.8 MB/s           |
+      | off        | PC -> phone | WIFI_HOTSPOT (phone hosts), ~6.1 MB/s |
+      | off        | phone -> PC | WIFI_HOTSPOT (we host)        |
+
+      Three of the four intermittent causes listed here previously are
+      resolved, and the diagnosis of two of them was wrong:
+
+        1. *(still open)* First BLE connection after launch fails the UKEY2
+           handshake; a re-send works. Now seen inbound too - the first
+           phone -> PC after an outbound send ends in state Initial without a
+           ConnectionRequest. Auto-retry was tried and reverted (shutdown hang).
+        2. *(fixed)* The phone's WiFi-Direct GO isn't in the first WiFi scan -
+           driven by AvailableNetworksChanged rather than a flat retry.
+        3. *(fixed)* "After the switch the phone doesn't drain the WiFi socket"
+           was two of our own bugs, not the phone's. We sent LAST_WRITE after
+           SAFE_TO_CLOSE, on a channel we had just told the peer it could
+           close; and we never closed the multiplex service channel, which is
+           what the peer's read loop waits for before it leaves the old medium.
+           The earlier note that closing BLE "made it worse" was correct about
+           the *action* taken - dropping the GATT link - and wrong about the
+           conclusion: closing the multiplex channel while keeping GATT up is
+           exactly what was needed.
+        4. *(not coexistence)* The pre-switch BLE phase was not being dragged by
+           WiFi/BLE coexistence - the Weave packet counter shows zero losses
+           across every capture. The ten-second stall at the switch was payload
+           chunk granularity: nothing else happens while a chunk is being
+           written, so a 32 KB chunk at ~7 KB/s meant the medium switch could
+           not land for ~5s after the event. Chunks are 8 KB over BLE now and
+           the switch lands in the same second.
+
+      Also still open:
+        - Joining the phone's AP installs a default route (0.0.0.0 via
+          192.168.49.1) - harmless with Ethernet holding the real route, but
+          should be suppressed.
+      **The phone dropping WiFi when it sends is the WiFi Direct wedge, not a
+      Quick Share behaviour.** Observed again on 2026-07-22: phone -> PC arrived
+      over BLE with `ap_frequency=-1` and no WIFI_LAN in its medium list, and
+      our own mDNS discovery watched the phone's service disappear from the
+      network moments before it connected - so it fell back to the AP we host,
+      costing ~21s of association. Toggling the Quick Share extension off and on
+      restored it, and phone -> PC then went over WIFI_LAN in two seconds. That
+      is the documented reset for a wedged P2P stack (see the WiFi Direct entry's
+      testing gotcha). Do not re-diagnose it as our advertising, and do not
+      conclude the LAN path is broken - check for the wedge first.
 
       **Historical threads (now moot):**
       1. Why does the set collapse to `[WIFI_LAN]`? Our ConnectionRequest now

@@ -53,6 +53,31 @@ type HmacSha256 = Hmac<Sha256>;
 const SANE_FRAME_LENGTH: i32 = 5 * 1024 * 1024;
 const SANITY_DURATION: Duration = Duration::from_micros(10);
 
+/// Whether to pursue the send-side WiFi upgrade: joining the hotspot the phone
+/// brings up when we are sending to it and its WiFi is off.
+///
+/// On by default - it is the whole point of the feature, and BLE at ~20 KB/s is
+/// not a transport anyone wants for a real file. `RQS_NO_SEND_WIFI_UPGRADE`
+/// forces the BLE-only path, which is worth having while the WiFi-Direct
+/// association timing is still being characterised: it is the difference
+/// between a slow transfer and no transfer if a phone behaves unexpectedly.
+///
+/// This gates the *announcement* as well as the join. If WIFI_HOTSPOT is never
+/// in our supported mediums the phone never offers a path, so switching this off
+/// disables the whole upgrade path rather than half of it.
+/// False where the upgrade is not implemented, so the medium list stays honest:
+/// only a build that can actually join a hotspot announces that it can.
+fn send_wifi_upgrade_enabled() -> bool {
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    {
+        std::env::var_os("RQS_NO_SEND_WIFI_UPGRADE").is_none()
+    }
+    #[cfg(not(all(feature = "experimental", target_os = "windows")))]
+    {
+        false
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, TS)]
 #[ts(export)]
 pub enum OutboundPayload {
@@ -86,6 +111,10 @@ pub struct OutboundRequest<S> {
     upgrade_tx: Option<tokio::sync::mpsc::UnboundedSender<tokio::net::TcpStream>>,
     #[cfg(all(feature = "experimental", target_os = "windows"))]
     switch_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+    /// Fired by the transport once the upgraded socket is spliced in. Payload
+    /// must not be written between requesting the switch and this.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    switched: Option<std::sync::Arc<tokio::sync::Notify>>,
     /// Set once the stream has moved onto an upgraded (WiFi) socket, so the
     /// send loop stops waiting for one and proceeds.
     #[cfg(all(feature = "experimental", target_os = "windows"))]
@@ -97,9 +126,6 @@ pub struct OutboundRequest<S> {
     /// finishes, and the send loop keeps streaming over BLE until it does.
     #[cfg(all(feature = "experimental", target_os = "windows"))]
     join_ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Whether we have already reacted to `join_ready` by sending LAST_WRITE.
-    #[cfg(all(feature = "experimental", target_os = "windows"))]
-    last_write_sent: bool,
     /// Whether a join is already running, so a repeated offer doesn't start a
     /// second one.
     #[cfg(all(feature = "experimental", target_os = "windows"))]
@@ -164,11 +190,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
             #[cfg(all(feature = "experimental", target_os = "windows"))]
             switch_tx: None,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
+            switched: None,
+            #[cfg(all(feature = "experimental", target_os = "windows"))]
             upgraded: false,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
             join_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            #[cfg(all(feature = "experimental", target_os = "windows"))]
-            last_write_sent: false,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
             join_started: false,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
@@ -184,9 +210,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
         &mut self,
         upgrade_tx: tokio::sync::mpsc::UnboundedSender<tokio::net::TcpStream>,
         switch_tx: tokio::sync::mpsc::UnboundedSender<()>,
+        switched: std::sync::Arc<tokio::sync::Notify>,
     ) {
         self.upgrade_tx = Some(upgrade_tx);
         self.switch_tx = Some(switch_tx);
+        self.switched = Some(switched);
     }
 
     /// Use smaller payload chunks, for a transport where writing one takes long
@@ -302,6 +330,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
         }
     }
 
+    /// Block until the peer sends something, then handle it.
+    ///
+    /// `service_pending_frames` drains what has already arrived and returns;
+    /// this waits for what has not. Used while holding payload back for the
+    /// medium switch, where there is a specific event we cannot proceed without
+    /// and spinning on `try_recv` would burn a core waiting for it. Frames are
+    /// fed by a background reader task, so awaiting here does not stop them
+    /// arriving.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    async fn await_next_frame(&mut self) -> Result<(), anyhow::Error> {
+        match self.frames.recv().await {
+            Some(frame_data) => Box::pin(self._handle(frame_data)).await,
+            None => Err(anyhow!(std::io::Error::from(
+                std::io::ErrorKind::UnexpectedEof
+            ))),
+        }
+    }
+
     pub async fn _handle(&mut self, frame_data: Vec<u8>) -> Result<(), anyhow::Error> {
         let current_state = &self.state;
         // Now determine what will be the request type based on current state
@@ -346,7 +392,44 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
             }
             _ => {
                 debug!("Handling SecureMessage frame");
-                let smsg = SecureMessage::decode(&*frame_data)?;
+                // Print the bytes when this fails. A protobuf error here says
+                // only that what arrived was not a SecureMessage; it cannot say
+                // what it was instead, and the answer has twice been "something
+                // from a lower layer that should never have reached us". The
+                // first bytes identify it immediately - 0x0A starts a real
+                // SecureMessage, 0x08 is a multiplex control body, 0x00 is a
+                // length prefix read at the wrong offset.
+                let smsg = match SecureMessage::decode(&*frame_data) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        // Not everything on an encrypted channel is encrypted.
+                        // The peer signs off with a *plaintext* DISCONNECTION -
+                        // measured as the 12 bytes
+                        // 08 01 12 08 08 06 3a 04 08 00 10 00, which is
+                        // OfflineFrame { V1, type: DISCONNECTION } - and trying
+                        // to read that as a SecureMessage produced an alarming
+                        // protobuf error for what is simply the other end
+                        // hanging up.
+                        if let Ok(plain) =
+                            location_nearby_connections::OfflineFrame::decode(&*frame_data)
+                        {
+                            if plain.v1.as_ref().and_then(|v| v.r#type).map(|t| t
+                                == location_nearby_connections::v1_frame::FrameType::Disconnection
+                                    as i32)
+                                == Some(true)
+                            {
+                                info!("Peer sent an unencrypted disconnect, ending session");
+                                return Err(anyhow!(crate::errors::AppError::NotAnError));
+                            }
+                        }
+                        error!(
+                            "Frame is not a SecureMessage ({e}); {} B beginning {:02x?}",
+                            frame_data.len(),
+                            &frame_data[..frame_data.len().min(32)]
+                        );
+                        return Err(e.into());
+                    }
+                };
                 self.decrypt_and_process_secure_message(&smsg).await?;
             }
         }
@@ -381,9 +464,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                     // Only claim WIFI_HOTSPOT when the send-side upgrade is
                     // enabled - otherwise we would invite the phone to negotiate
                     // a medium we then ignore, leaving it retrying.
-                    mediums: if self.chunk_size < 512 * 1024
-                        && std::env::var("RQS_SEND_WIFI_UPGRADE").is_ok()
-                    {
+                    mediums: if self.chunk_size < 512 * 1024 && send_wifi_upgrade_enabled() {
                         vec![Medium::WifiHotspot.into(), Medium::WifiLan.into()]
                     } else {
                         vec![Medium::WifiLan.into()]
@@ -751,7 +832,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                     // first wins: if the join lands we switch to WiFi; if the
                     // file finishes first, cleanup_upgrade aborts the join and
                     // disconnects WiFi - no size threshold, the events decide.
-                    if std::env::var("RQS_SEND_WIFI_UPGRADE").is_ok() {
+                    if send_wifi_upgrade_enabled() {
                         self.spawn_join(creds);
                     }
                 }
@@ -770,16 +851,60 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                                 == location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType::LastWriteToPriorChannel
                         })
                         .unwrap_or(false);
-                    if is_last_write {
-                        // Only reachable if we host, which as the sender we no
-                        // longer do. Kept because the frame is legal and
-                        // answering it costs nothing.
-                        info!("Bandwidth upgrade: LAST_WRITE_TO_PRIOR_CHANNEL; releasing the old channel");
+                    if is_last_write && !self.upgraded {
+                        // The peer is done writing to the old channel. Answer on
+                        // that channel, say our own last word on it, and move.
+                        //
+                        // We do not get a SAFE_TO_CLOSE back. As the side that
+                        // *joined* the upgraded medium we are the client, and
+                        // the peer treats the old channel as finished once it
+                        // has our SAFE_TO_CLOSE. Waiting for one - which this
+                        // code did - deadlocks: the peer waits for us to start
+                        // using the new medium, we wait for a frame it will
+                        // never send, and about nine seconds later it gives up
+                        // and sends a plaintext DISCONNECTION
+                        // (08 01 12 08 08 06 3a 04 08 00 10 00). That was
+                        // measured three times out of three.
+                        //
+                        // SAFE_TO_CLOSE is the last thing we may put on this
+                        // channel. Not one frame more.
+                        //
+                        // The name is literal: it tells the peer it may close
+                        // the prior channel, and the peer does so immediately.
+                        // A LAST_WRITE sent after it - which this code did, for
+                        // protocol tidiness - lands on a channel that is already
+                        // going away and comes back as
+                        // "EndpointManager received an invalid OfflineFrame ...
+                        // invalid tag (zero)" 119 ms after the peer logs
+                        // "process BANDWIDTH_UPGRADE_NEGOTIATION frame event
+                        // type:SAFE_TO_CLOSE_PRIOR_CHANNEL". The peer then stops
+                        // reading, and every such transfer stalls at exactly the
+                        // 98304 bytes BLE had already delivered.
+                        //
+                        // We owe no LAST_WRITE of our own here. As the side that
+                        // joined the upgraded medium we are the client: the peer
+                        // announces it is done with the old channel, we
+                        // acknowledge, and the channel is finished.
+                        info!("Bandwidth upgrade: peer sent LAST_WRITE_TO_PRIOR_CHANNEL; answering");
                         if let Err(e) = self.send_safe_to_close_prior_channel().await {
                             warn!("send_safe_to_close_prior_channel failed: {e}");
                         }
-                        if let Some(tx) = &self.switch_tx {
-                            let _ = tx.send(());
+                        // Only move if there is something to move onto. The
+                        // peer's LAST_WRITE can only follow our
+                        // CLIENT_INTRODUCTION, which only happens once the join
+                        // has landed, so this should always hold - but splicing
+                        // onto a socket that does not exist would strand the
+                        // transfer on a channel both sides have just finished
+                        // with, and that is worth being explicit about.
+                        if self.switch_tx.is_some()
+                            && self.join_ready.load(std::sync::atomic::Ordering::Relaxed)
+                        {
+                            self.switch_to_upgraded_medium().await;
+                        } else {
+                            warn!(
+                                "Bandwidth upgrade: peer released the prior channel before the \
+                                 join was ready; staying on the current medium"
+                            );
                         }
                     }
 
@@ -796,23 +921,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                                 == location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType::SafeToClosePriorChannel
                         })
                         .unwrap_or(false);
-                    if is_safe_to_close {
+                    // Both sides have now said their last word on the old
+                    // channel, so it is released and the stream can move. This
+                    // is the switch point, and the only one.
+                    // `switch_tx` is cleared when an upgrade is abandoned, so a
+                    // late answer cannot splice a stream that has moved on.
+                    if is_safe_to_close && !self.upgraded && self.switch_tx.is_some() {
                         info!("Bandwidth upgrade: peer released the prior channel; switching");
-                        if let Some(tx) = &self.switch_tx {
-                            let _ = tx.send(());
-                        }
-                        // The send loop's head-start window can now proceed, over
-                        // the new medium.
-                        self.upgraded = true;
-                        // Back to large chunks. 32 KB was chosen so a BLE write
-                        // couldn't monopolise the loop for 25s; on WiFi that
-                        // small size caps us at ~40 KB/s, because the per-chunk
-                        // fixed cost (encrypt, UI update, keepalive service)
-                        // dominates - roughly one chunk a second regardless of
-                        // link speed. A 512 KB chunk amortises that overhead
-                        // ~16x.
-                        self.chunk_size = 512 * 1024;
-                        info!("Bandwidth upgrade: raised chunk size to 512 KB for the fast medium");
+                        self.switch_to_upgraded_medium().await;
                     }
                 }
             }
@@ -1103,20 +1219,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                 // When the switch event fires (see the SafeToClose handler) the
                 // socket is spliced under the duplex and the very next chunk
                 // goes over WiFi - whenever that happens, however long it took.
-                // The send-side WiFi upgrade (join the phone's hotspot) is
-                // opt-in behind RQS_SEND_WIFI_UPGRADE.
-                //
-                // It works - a large file reaches 6 MB/s over the phone's 5GHz
-                // AP - but not reliably: the WiFi-Direct association timing
-                // varies, the phone intermittently stalls draining the upgraded
-                // socket, and BLE/WiFi coexistence drags the pre-switch BLE
-                // phase. The other three WiFi cases (LAN both ways, phone->PC
-                // hotspot) are solid. Rather than ship a flaky default, PC->phone
-                // with WiFi off streams over BLE unless this is set. If we never
-                // announce WIFI_HOTSPOT the phone never offers it, so nothing
-                // else in the upgrade path runs.
+                // The send-side WiFi upgrade (join the phone's hotspot) rides
+                // along with it, on by default - see send_wifi_upgrade_enabled.
                 #[cfg(all(feature = "experimental", target_os = "windows"))]
-                if self.upgrade_tx.is_some() && std::env::var("RQS_SEND_WIFI_UPGRADE").is_ok() {
+                if self.upgrade_tx.is_some() && send_wifi_upgrade_enabled() {
                     info!("Requesting a bandwidth upgrade; streaming over BLE meanwhile");
                     let _ = self.send_supported_mediums().await;
                     let _ = self.send_upgrade_path_request().await;
@@ -1171,9 +1277,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                     // (`!self.upgraded`) - a negotiation frame in the encrypted
                     // payload stream wedges the peer.
                     #[cfg(all(feature = "experimental", target_os = "windows"))]
-                    if self.chunk_size < 512 * 1024
-                        && !self.upgraded
-                        && std::env::var("RQS_SEND_WIFI_UPGRADE").is_ok()
+                    if self.chunk_size < 512 * 1024 && !self.upgraded && send_wifi_upgrade_enabled()
                     {
                         if let Err(e) = self.send_upgrade_path_request().await {
                             warn!("send_upgrade_path_request failed: {e}");
@@ -1188,25 +1292,38 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                         // whole transfer and closes at its 30s timeout.
                         self.service_pending_frames().await?;
 
-                        // Event-driven medium switch.
+                        // Stop feeding payload the moment the join is ready, and
+                        // do not resume until the stream has actually moved.
                         //
-                        // The background join sets join_ready when the WiFi
-                        // socket is connected and introduced; that is when
-                        // LAST_WRITE goes out. Between LAST_WRITE and the peer's
-                        // SAFE_TO_CLOSE we must not write more payload to the old
-                        // (BLE) channel - the protocol says we are done with it -
-                        // so pause the file loop for that brief window. It is
-                        // milliseconds (the slow part, the join, already
-                        // happened in the background while we streamed BLE), and
-                        // when `upgraded` flips the very next chunk goes over
-                        // WiFi at 512 KB.
+                        // The peer promotes its own channel when it receives
+                        // CLIENT_INTRODUCTION, not when the old channel closes.
+                        // Its log is explicit about both the moment and the
+                        // cost: "replaced endpoint's channel from ENCRYPTED_BLE
+                        // to ENCRYPTED_WIFI_HOTSPOT" at 13:24:38.394, while this
+                        // side went on writing payload over BLE until 13:24:47
+                        // because the transport was still draining a 32 KB chunk
+                        // queued before any of this began. Nine seconds of
+                        // writing to a channel the peer had already replaced,
+                        // and the transfer never lined up again - it stopped at
+                        // the 98304 bytes BLE had delivered and the peer
+                        // cancelled sixty seconds later.
+                        //
+                        // Holding here empties the transport's backlog instead
+                        // of growing it, so the splice happens promptly once the
+                        // peer releases the old channel. Waiting is done by
+                        // servicing frames, which is also how the event we are
+                        // waiting for - the peer's LAST_WRITE - arrives.
+                        //
+                        // No deadline. The peer sent LAST_WRITE within a second
+                        // of the introduction in every capture, and if it never
+                        // does, its own transfer timeout ends the session with a
+                        // real error rather than this side inventing one.
                         #[cfg(all(feature = "experimental", target_os = "windows"))]
+                        while self.join_ready.load(std::sync::atomic::Ordering::Relaxed)
+                            && !self.upgraded
+                            && self.switch_tx.is_some()
                         {
-                            self.maybe_send_last_write().await?;
-                            if self.last_write_sent && !self.upgraded {
-                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                                continue;
-                            }
+                            self.await_next_frame().await?;
                         }
 
                         let tp_elapsed = tp_last.elapsed();
@@ -1618,9 +1735,28 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
     }
 
     async fn encrypt_and_send(&mut self, frame: &OfflineFrame) -> Result<(), anyhow::Error> {
+        let plaintext = frame.encode_to_vec();
+        let seq = self.get_server_seq_inc().await;
+
+        // What we actually put on the wire, in order, with its sequence number.
+        //
+        // The peer discards our first encrypted frame with "Protocol message
+        // contained an invalid tag (zero)" and then rejects the next one for an
+        // incorrect sequence number, three milliseconds after it flips the
+        // channel to encrypted. Both halves of that are statements about bytes
+        // and ordering, and until now this side had no record of either - every
+        // conclusion about what we sent has been inferred. This makes it
+        // observable.
+        debug!(
+            "encrypt_and_send: seq {seq}, type {:?}, {} B plaintext beginning {:02x?}",
+            frame.v1.as_ref().and_then(|v| v.r#type),
+            plaintext.len(),
+            &plaintext[..plaintext.len().min(16)]
+        );
+
         let d2d_msg = DeviceToDeviceMessage {
-            sequence_number: Some(self.get_server_seq_inc().await),
-            message: Some(frame.encode_to_vec()),
+            sequence_number: Some(seq),
+            message: Some(plaintext),
         };
 
         let key = self.state.encrypt_key.as_ref().unwrap();
@@ -1773,6 +1909,38 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                 }
                 let mut frame = vec![0u8; len];
                 socket.read_exact(&mut frame).await?;
+
+                // Check what came back, rather than assuming.
+                //
+                // This used to log "got CLIENT_INTRODUCTION_ACK" on the strength
+                // of having read *some* frame, which made the log worse than
+                // useless: it asserted the peer had accepted the new medium
+                // when nothing had been decoded. The peer's own record of the
+                // same transfer said the opposite - "physicalConnectionClosed()
+                // for medium WIFI_HOTSPOT with no corresponding
+                // EstablishedConnection that was previously opened", active
+                // medium still BLE, 98304 bytes received and not one of them
+                // over WiFi.
+                //
+                // A join that is not acknowledged must fail here. Failing leaves
+                // `join_ready` false, so the switch never fires and the transfer
+                // finishes over BLE - slow, but a slow transfer is a transfer.
+                let ack = location_nearby_connections::OfflineFrame::decode(&*frame)
+                    .map_err(|e| anyhow!("peer's reply on the upgraded socket was not a frame: {e}"))?;
+                let event = ack
+                    .v1
+                    .as_ref()
+                    .and_then(|v| v.bandwidth_upgrade_negotiation.as_ref())
+                    .map(|bun| bun.event_type());
+                if event
+                    != Some(
+                        location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType::ClientIntroductionAck,
+                    )
+                {
+                    return Err(anyhow!(
+                        "peer did not acknowledge the introduction; it replied with {event:?}"
+                    ));
+                }
                 info!("Bandwidth upgrade: got CLIENT_INTRODUCTION_ACK");
 
                 if upgrade_tx.send(socket).is_err() {
@@ -1806,38 +1974,51 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
         }
     }
 
-    /// Send LAST_WRITE once the background join is ready. Called from the send
-    /// loop; needs the encrypted channel, which is why it can't live in the
-    /// join task.
+    /// Move the stream onto the upgraded socket.
+    ///
+    /// Called when the peer answers SAFE_TO_CLOSE_PRIOR_CHANNEL - the point at
+    /// which both sides have agreed the old channel is drained.
     #[cfg(all(feature = "experimental", target_os = "windows"))]
-    async fn maybe_send_last_write(&mut self) -> Result<(), anyhow::Error> {
-        use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType;
-        use crate::location_nearby_connections::BandwidthUpgradeNegotiationFrame;
-
-        if self.last_write_sent
-            || !self.join_ready.load(std::sync::atomic::Ordering::Relaxed)
-        {
-            return Ok(());
+    async fn switch_to_upgraded_medium(&mut self) {
+        // Register for the confirmation *before* asking, so the splice cannot
+        // complete in the gap and leave us waiting for a signal already sent.
+        let confirmed = self.switched.clone();
+        let wait = confirmed.as_ref().map(|n| n.notified());
+        tokio::pin!(wait);
+        if let Some(w) = wait.as_mut().as_pin_mut() {
+            w.enable();
         }
-        self.last_write_sent = true;
 
-        let last_write = location_nearby_connections::OfflineFrame {
-            version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
-            v1: Some(location_nearby_connections::V1Frame {
-                r#type: Some(
-                    location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation
-                        .into(),
-                ),
-                bandwidth_upgrade_negotiation: Some(BandwidthUpgradeNegotiationFrame {
-                    event_type: Some(EventType::LastWriteToPriorChannel.into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-        };
-        self.encrypt_and_send(&last_write).await?;
-        info!("Bandwidth upgrade: sent LAST_WRITE_TO_PRIOR_CHANNEL");
-        Ok(())
+        if let Some(tx) = &self.switch_tx {
+            let _ = tx.send(());
+        }
+
+        // Wait for the transport to report the socket spliced. No deadline.
+        //
+        // There was a 10s bound here and it was actively harmful: the transport
+        // is not stuck during this wait, it is finishing BLE writes that were
+        // already queued - a 32 KB frame at 6 KB/s is about five seconds, so ten
+        // is entirely ordinary. When the bound expired we carried on as though
+        // upgraded and started writing 512 KB chunks into a bridge still
+        // draining over BLE. Measured: we declared the switch at 19:23:42, the
+        // transport actually spliced at 19:23:43, and the transfer died of a
+        // broken pipe a minute later.
+        //
+        // Nothing can hang here indefinitely. Every Weave write is bounded, so a
+        // dead link ends the pump, which drops the duplex and fails this
+        // transfer with a real error rather than a silent corruption.
+        if let Some(w) = wait.as_pin_mut() {
+            w.await;
+        }
+
+        self.upgraded = true;
+        // Back to large chunks. 32 KB was chosen so a BLE write couldn't
+        // monopolise the loop for 25s; on WiFi that small size caps us at
+        // ~40 KB/s, because the per-chunk fixed cost (encrypt, UI update,
+        // keepalive service) dominates - roughly one chunk a second regardless
+        // of link speed. A 512 KB chunk amortises that overhead ~16x.
+        self.chunk_size = 512 * 1024;
+        info!("Bandwidth upgrade: switched to the new medium; raising chunk size");
     }
 
     /// Tell the peer which upgrade mediums we support.
@@ -1955,6 +2136,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
         let mut prefixed_length = Vec::with_capacity(length + 4);
         prefixed_length.extend_from_slice(&length_bytes);
         prefixed_length.extend_from_slice(&data);
+
+        // Every frame that leaves this side, encrypted or not, at the point it
+        // hits the transport. Pairs with the peer's millisecond timestamps: the
+        // question that keeps going unanswered is which of our frames arrives
+        // on which side of the peer's switch to an encrypted channel, and that
+        // cannot be settled without knowing when each one went out.
+        trace!("send_frame: {length} B on the wire beginning {:02x?}",
+            &data[..data.len().min(12)]);
 
         self.socket.write_all(&prefixed_length).await?;
         self.socket.flush().await?;

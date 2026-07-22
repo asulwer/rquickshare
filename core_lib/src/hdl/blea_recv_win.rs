@@ -167,6 +167,12 @@ impl BleReceiverAdvertiser {
         // "nothing on the upgraded socket within 20s".
         let tx_pending = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let pump_pending = tx_pending.clone();
+        // Signalled by the sender thread the moment its queue empties, so the
+        // bridge waits on the event rather than re-reading the counter on a
+        // 50ms tick. `Notify` is Send+Sync, so the WinRT thread can fire it
+        // directly.
+        let tx_drained = std::sync::Arc::new(tokio::sync::Notify::new());
+        let pump_drained = tx_drained.clone();
 
         let session_sender = self.sender.clone();
         let session_outbound_tx = outbound_tx.clone();
@@ -211,11 +217,20 @@ impl BleReceiverAdvertiser {
             let pump_us = pump_us.clone();
             let pump_calls = pump_calls.clone();
             let pump_pending = pump_pending.clone();
+            let pump_drained = pump_drained.clone();
             let msg_sender = session_sender.clone();
             let ui_sender = session_sender.clone();
             let end_recycle = session_recycle.clone();
+            // The session task waits for its own last frames to be confirmed
+            // before releasing the link - see the recycle below.
+            let end_pending = pump_pending.clone();
+            let end_drained = pump_drained.clone();
 
         tokio::spawn(async move {
+            // Off the radio while we receive: a concurrent BLE scan starves the
+            // connection. Released when this session ends, whatever ends it.
+            let _pause = crate::hdl::DiscoveryPause::new();
+
             let mut request =
                 super::InboundRequest::new(theirs, "ble".to_string(), msg_sender);
             request.set_upgrade_sink(upgrade_tx, switch_tx);
@@ -263,10 +278,22 @@ impl BleReceiverAdvertiser {
             // Recycling immediately cut the connection while the phone was still
             // completing the transfer: the PC had the whole file and the phone
             // sat on "sending" forever, because it never saw the end of the
-            // exchange. Our last frames are indications that can take seconds to
-            // confirm on this link, so the wait has to cover that rather than
-            // just the round trip.
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            // exchange. That was patched with a flat 5s guess; the exact
+            // condition is "our final frames have been confirmed", which is
+            // precisely what the drained signal means. Wait for the event, not
+            // the clock - it releases the link as soon as the peer has really
+            // caught up, and waits longer than 5s if this link is slow.
+            //
+            // Registered before reading the counter so a drain in the gap can't
+            // be missed. The 10s bound only stops us hanging if the sender never
+            // drains; it does not choose a different course.
+            let drained = end_drained.notified();
+            tokio::pin!(drained);
+            drained.as_mut().enable();
+            if end_pending.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                let _ =
+                    tokio::time::timeout(std::time::Duration::from_secs(10), drained).await;
+            }
             // Drop the peer's GATT connection, so the next transfer - in either
             // direction - starts from a clean link.
             end_recycle.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -433,12 +460,6 @@ impl BleReceiverAdvertiser {
                                 // congested BLE link that is tens of seconds
                                 // apart - the peer will not use the new socket
                                 // until it has it.
-                                // Let the sender thread pick the queue up before
-                                // asking whether it is empty: it publishes
-                                // `tx_pending` once per 50ms loop, so checking
-                                // immediately would read a stale 0 and "drain"
-                                // instantly - the same mistake in miniature.
-                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
                                 // Give it a moment to go out, but do not wait on
                                 // confirmation.
@@ -452,12 +473,26 @@ impl BleReceiverAdvertiser {
                                 // SAFE_TO_CLOSE is queued it goes out whether we
                                 // are still here or not. Queueing it was the
                                 // part that was actually missing.
-                                let drain_deadline = std::time::Instant::now()
-                                    + std::time::Duration::from_secs(3);
-                                while pump_pending.load(std::sync::atomic::Ordering::Relaxed) > 0
-                                    && std::time::Instant::now() < drain_deadline
-                                {
-                                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                //
+                                // Wait on the drained signal, not a tick.
+                                //
+                                // The waiter is registered *before* reading the
+                                // counter: otherwise the sender could drain in
+                                // the gap between the check and the await, the
+                                // wakeup would be missed, and we'd sit out the
+                                // full timeout. The 3s bound is a safety net
+                                // only - if the sender never drains we proceed
+                                // anyway rather than hang, and it never selects
+                                // a different strategy.
+                                let drained = pump_drained.notified();
+                                tokio::pin!(drained);
+                                drained.as_mut().enable();
+                                if pump_pending.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                                    let _ = tokio::time::timeout(
+                                        std::time::Duration::from_secs(3),
+                                        drained,
+                                    )
+                                    .await;
                                 }
                                 info!(
                                     "{INNER_NAME}: prior channel released ({} packet(s) still \
@@ -1017,6 +1052,7 @@ impl BleReceiverAdvertiser {
             let in_flight = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
             let mut last_status: i32 = -1;
+            let mut adv_paused = false;
             while !ctk.is_cancelled() {
                 while let Ok(msg) = outbound_rx.try_recv() {
                     frame_weave(&msg, &mut tx_queue);
@@ -1040,11 +1076,14 @@ impl BleReceiverAdvertiser {
 
                 // Publish what is still owed to the peer, so the bridge can wait
                 // for SAFE_TO_CLOSE to actually land before switching mediums.
-                tx_pending.store(
-                    tx_queue.len()
-                        + usize::from(in_flight.load(std::sync::atomic::Ordering::Relaxed)),
-                    std::sync::atomic::Ordering::Relaxed,
-                );
+                let owed = tx_queue.len()
+                    + usize::from(in_flight.load(std::sync::atomic::Ordering::Relaxed));
+                tx_pending.store(owed, std::sync::atomic::Ordering::Relaxed);
+                if owed == 0 {
+                    // Everything queued has been acknowledged; wake anyone
+                    // waiting to switch mediums.
+                    tx_drained.notify_waiters();
+                }
 
                 // At most one indication outstanding. The completion handler
                 // clears the flag, so the next goes out only once the phone has
@@ -1108,10 +1147,60 @@ impl BleReceiverAdvertiser {
                         }
                     }
                 }
+                // Stop advertising while we are sending over BLE, and resume
+                // when the send ends.
+                //
+                // The counterpart to pausing the scan, and for the same reason:
+                // discovery and a transfer contend for one radio. Advertising
+                // costs more than throughput though - it costs the handshake.
+                // A phone that sees our advertisement tries to fetch the full
+                // version over GATT, and its own log says what that does to a
+                // connection it is already serving:
+                //
+                //   Received advertisement header BleAdvertisementHeader { .. }
+                //   Try to fetch advertisement from a possible IOS target.
+                //   Not allow Gatt actions during scanning.
+                //   BleGattServerProviderV1: Passing wrong device!
+                //   Receive completion for unexpected operation: SEND_NOTIFICATION
+                //   BleSocketOutputStream failed to write data / status 133
+                //
+                // The phone's GATT server got a notification completion it could
+                // not attribute, gave up on the Weave socket and tore it down -
+                // measured mid-UKEY2, so the transfer died in the handshake with
+                // no prompt shown. We were advertising *at* the peer we were
+                // mid-handshake with. Nothing needs to discover us while we are
+                // busy; the session that matters is already established.
+                //
+                // Outbound BLE sends only - see `AdvertisePause`. Stopping the
+                // advertisement drops connected GATT clients, so doing this on
+                // an inbound transfer would tear down the session it is meant
+                // to protect.
+                let want_paused = crate::hdl::ble_send_in_progress();
+                if want_paused != adv_paused {
+                    if want_paused {
+                        let _ = provider.StopAdvertising();
+                        info!("{INNER_NAME}: BLE send in progress, pausing the advertisement");
+                    } else {
+                        match provider.StartAdvertisingWithParameters(&params) {
+                            Ok(()) => {
+                                info!("{INNER_NAME}: BLE send finished, resuming the advertisement")
+                            }
+                            Err(e) => {
+                                warn!("{INNER_NAME}: could not resume advertising: {e}")
+                            }
+                        }
+                    }
+                    adv_paused = want_paused;
+                    last_status = -1;
+                }
+
                 // A session ended: stop and restart advertising, which drops the
                 // peer's GATT connection. Without this the phone stays connected
                 // after a transfer and the *other* direction cannot get the link.
-                if recycle_adv.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                //
+                // Skipped while paused - there is nothing to recycle, and
+                // restarting here would undo the pause above.
+                if recycle_adv.swap(false, std::sync::atomic::Ordering::Relaxed) && !adv_paused {
                     let _ = provider.StopAdvertising();
                     std::thread::sleep(std::time::Duration::from_millis(500));
                     match provider.StartAdvertisingWithParameters(&params) {

@@ -206,10 +206,53 @@ async fn read_peer_advertisement(
 static LAN_NAMES: once_cell::sync::Lazy<std::sync::Mutex<std::collections::HashSet<String>>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
-/// Record a peer found over mDNS, so BLE discovery can suppress its duplicate.
+/// Where to publish endpoint changes, so a peer that turns up on the LAN can
+/// retract its own BLE listing. Set while `BleDiscovery` is running.
+static BLE_SENDER: once_cell::sync::Lazy<std::sync::Mutex<Option<Sender<EndpointInfo>>>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
+
+/// Record a peer found over mDNS, and retract any BLE entry for the same device.
+///
+/// Event-driven supersede, replacing a fixed head start. BLE advertisements
+/// arrive in about a second while an mDNS service takes longer to resolve, so
+/// the old code simply *waited* 4s before listing anything over BLE, hoping mDNS
+/// would win. That is a guess with a timer: too short and a LAN peer still gets
+/// listed as a slow BLE target, too long and every genuinely BLE-only peer is
+/// delayed for nothing.
+///
+/// Instead, list BLE immediately and let this retract it when the mDNS event
+/// actually arrives. The user sees peers ~4s sooner, and LAN still wins whenever
+/// it is available - decided by the event rather than by a deadline.
 pub fn note_lan_peer(name: &str) {
-    if let Ok(mut s) = LAN_NAMES.lock() {
-        s.insert(name.to_string());
+    let newly_known = LAN_NAMES
+        .lock()
+        .map(|mut s| s.insert(name.to_string()))
+        .unwrap_or(false);
+    if !newly_known {
+        return;
+    }
+
+    // Drop any BLE entries already shown for this device. The frontend removes
+    // an endpoint sent with only its id, the same way mDNS reports a service
+    // going away.
+    let addresses = NAME_ADDRESSES
+        .lock()
+        .ok()
+        .and_then(|n| n.get(name).cloned())
+        .unwrap_or_default();
+    if addresses.is_empty() {
+        return;
+    }
+    if let Ok(guard) = BLE_SENDER.lock() {
+        if let Some(sender) = guard.as_ref() {
+            for id in addresses {
+                debug!("{INNER_NAME}: {name} is on the LAN now, retracting its BLE entry {id}");
+                let _ = sender.send(EndpointInfo {
+                    id,
+                    ..Default::default()
+                });
+            }
+        }
     }
 }
 
@@ -231,6 +274,124 @@ pub fn clear_lan_peers() {
 
 fn known_on_lan(name: &str) -> bool {
     LAN_NAMES.lock().map(|s| s.contains(name)).unwrap_or(false)
+}
+
+/// How many transfers are in flight. Discovery stops scanning while any are.
+///
+/// A BLE scan and a BLE connection compete for the same radio: scanning through
+/// a transfer cut throughput from ~20 KB/s to 3-4 KB/s, and a starved link
+/// during connection setup is also the likeliest source of the first-connection
+/// handshake failures. A `watch` rather than a Notify because discovery must not
+/// miss the change - once scanning stops there are no BLE events to wake it, so
+/// a lost wakeup would suppress scanning permanently.
+static TRANSFER_COUNT: once_cell::sync::Lazy<tokio::sync::watch::Sender<usize>> =
+    once_cell::sync::Lazy::new(|| tokio::sync::watch::channel(0usize).0);
+
+/// Pauses BLE discovery for as long as it is held.
+///
+/// RAII on purpose: a transfer can end by completion, error, cancel or a dropped
+/// task, and every one of those must release the pause. A manual
+/// `transfer_finished()` would eventually be missed on some error path and leave
+/// the app permanently unable to discover anything.
+pub struct DiscoveryPause;
+
+impl DiscoveryPause {
+    pub fn new() -> Self {
+        TRANSFER_COUNT.send_modify(|n| *n += 1);
+        Self
+    }
+}
+
+impl Default for DiscoveryPause {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Outbound BLE transfers only - see `AdvertisePause`.
+static BLE_SEND_COUNT: once_cell::sync::Lazy<std::sync::atomic::AtomicUsize> =
+    once_cell::sync::Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
+
+/// Pauses the BLE *receiver advertisement* while we are sending over BLE.
+///
+/// Deliberately separate from `DiscoveryPause` rather than sharing its counter.
+/// `DiscoveryPause` is also held by inbound sessions, and stopping the
+/// advertisement is exactly how we drop a peer's GATT connection (see the
+/// recycle in `blea_recv_win`) - so pausing on an inbound transfer would tear
+/// down the very session being paused for. This counts outbound BLE sends only,
+/// where our GATT server has no session to lose.
+pub struct AdvertisePause;
+
+impl AdvertisePause {
+    pub fn new() -> Self {
+        BLE_SEND_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Default for AdvertisePause {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for AdvertisePause {
+    fn drop(&mut self) {
+        BLE_SEND_COUNT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Is a BLE send running right now?
+pub fn ble_send_in_progress() -> bool {
+    BLE_SEND_COUNT.load(std::sync::atomic::Ordering::SeqCst) > 0
+}
+
+impl Drop for DiscoveryPause {
+    fn drop(&mut self) {
+        TRANSFER_COUNT.send_modify(|n| *n = n.saturating_sub(1));
+    }
+}
+
+/// Publish a peer, unless it is reachable over the LAN or already listed.
+///
+/// Free-standing so the concurrent identification tasks can call it; the shared
+/// maps are global and mutex-guarded, so this is safe from any task.
+fn list_peer(
+    sender: &Sender<EndpointInfo>,
+    name: String,
+    device_type: u8,
+    address: &str,
+    peripheral: &btleplug::platform::Peripheral,
+) {
+    // Already reachable over the network - don't offer a second, far slower way
+    // to reach the same phone.
+    if known_on_lan(&name) {
+        debug!("{INNER_NAME}: {name} is already on the LAN, not listing it over BLE");
+        return;
+    }
+
+    // A rotated address for a device already in the list. Point its old
+    // addresses at this peripheral so the entry the user is looking at still
+    // works, but don't list it again.
+    if already_listed(&name) {
+        remember_peer(&name, address, peripheral);
+        debug!("{INNER_NAME}: {name} reappeared at {address}, refreshed");
+        return;
+    }
+    remember_peer(&name, address, peripheral);
+
+    let ei = EndpointInfo {
+        fullname: address.to_string(),
+        id: address.to_string(),
+        name: Some(name),
+        ip: Some("ble".to_string()),
+        port: Some(address.to_string()),
+        rtype: Some(DeviceType::from_raw_value(device_type)),
+        present: Some(true),
+        qr_match: Some(false),
+    };
+    info!("{INNER_NAME}: discovered BLE receiver: {ei:?}");
+    let _ = sender.send(ei);
 }
 
 pub struct BleDiscovery {
@@ -267,25 +428,61 @@ impl BleDiscovery {
         // pile up duplicates in the UI.
         let mut seen: HashMap<String, ()> = HashMap::new();
 
-        // Give mDNS a head start.
-        //
-        // BLE advertisements arrive within a second; an mDNS service takes
-        // longer to resolve. Without this, BLE wins the race and the LAN
-        // suppression never fires, so a phone sitting on the same network gets
-        // offered as a BLE target - and the user picks the 20 KB/s path over the
-        // fast one. Measured: a PC->phone transfer went over BLE with both
-        // devices on WiFi, and the phone closed the connection a second later.
-        //
-        // Costs nothing when there is no LAN peer: advertisements repeat
-        // constantly, so anything skipped here is seen again immediately after.
-        let started = std::time::Instant::now();
-        const MDNS_HEAD_START: std::time::Duration = std::time::Duration::from_secs(4);
+        // Publish through this while we run, so `note_lan_peer` can retract a
+        // BLE entry the moment mDNS resolves the same device.
+        if let Ok(mut guard) = BLE_SENDER.lock() {
+            *guard = Some(self.sender.clone());
+        }
+
+        // Owns the concurrent identification tasks. A JoinSet rather than bare
+        // `tokio::spawn` so they are reaped as they finish and, more
+        // importantly, aborted when the scan stops - a cancelled scan must not
+        // leave GATT connections being opened in the background.
+        let mut identifiers: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        // Watch for transfers so we can get off the radio while one runs.
+        let mut transfers = TRANSFER_COUNT.subscribe();
+        let mut scanning = true;
+        // Peripherals an identification task currently holds open. Aborting a
+        // task kills it at an await point, so its own `disconnect` never runs -
+        // and a GATT connection we keep open stops the peer being discoverable
+        // (measured yesterday: the PC vanished from the phone's list until the
+        // link was released). Shutdown disconnects whatever is left here.
+        let in_flight: std::sync::Arc<
+            std::sync::Mutex<HashMap<String, btleplug::platform::Peripheral>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
 
         loop {
             tokio::select! {
                 _ = ctk.cancelled() => {
                     info!("{INNER_NAME}: tracker cancelled, breaking");
                     break;
+                }
+                // Get off the radio while a transfer is running, and back on
+                // when it finishes. Scanning through a transfer starves the
+                // connection - measured at 3-4 KB/s instead of ~20.
+                Ok(()) = transfers.changed() => {
+                    let busy = *transfers.borrow() > 0;
+                    if busy && scanning {
+                        info!("{INNER_NAME}: transfer in progress, pausing the scan");
+                        let _ = self.adapter.stop_scan().await;
+                        scanning = false;
+                    } else if !busy && !scanning {
+                        info!("{INNER_NAME}: transfers finished, resuming the scan");
+                        if let Err(e) = self.adapter.start_scan(ScanFilter::default()).await {
+                            warn!("{INNER_NAME}: could not resume scanning: {e}");
+                        }
+                        scanning = true;
+                    }
+                }
+                // Reap finished identifications so the set doesn't grow for the
+                // life of a long scan. Guarded because `join_next` on an empty
+                // set returns immediately.
+                Some(res) = identifiers.join_next(), if !identifiers.is_empty() => {
+                    if let Err(e) = res {
+                        if !e.is_cancelled() {
+                            debug!("{INNER_NAME}: peer identification task failed: {e}");
+                        }
+                    }
                 }
                 Some(e) = events.next() => {
                     let mut advertised: Option<Vec<u8>> = None;
@@ -328,12 +525,6 @@ impl BleDiscovery {
                         _ => continue,
                     };
 
-                    // Skip entirely - don't mark it seen - so the peer is
-                    // reconsidered once mDNS has had its chance.
-                    if started.elapsed() < MDNS_HEAD_START {
-                        continue;
-                    }
-
                     let peripheral = match self.adapter.peripheral(&id).await {
                         Ok(p) => p,
                         Err(e) => {
@@ -361,71 +552,83 @@ impl BleDiscovery {
                     // advertisement doesn't parse as NearbySharing isn't a
                     // target - one answered our multiplex request with service
                     // hash b7ef32 rather than fc9f5e.
-                    let parsed = advertised
+                    let Some(p) = advertised
                         .as_deref()
-                        .and_then(super::parse_peer_advertisement);
-
-                    let (name, device_type) = match parsed {
-                        // Full form: the name came with it.
-                        Some(p) if p.name.is_some() => (p.name.unwrap(), p.device_type),
-                        // Fast form: no room for a name, so ask for it over
-                        // GATT and fall back to the endpoint id if the peer has
-                        // no slot 0 to read.
-                        Some(p) => match read_peer_advertisement(&peripheral).await {
-                            Some(v) => v,
-                            None => (
-                                format!(
-                                    "Quick Share device ({})",
-                                    String::from_utf8_lossy(&p.endpoint_id)
-                                ),
-                                p.device_type,
-                            ),
-                        },
-                        None => {
-                            debug!(
-                                "{INNER_NAME}: {address} advertises 0xFEF3 but not NearbySharing, \
-                                 skipping"
-                            );
-                            continue;
-                        }
-                    };
-
-                    // Already reachable over the network - don't offer a second,
-                    // far slower way to reach the same phone.
-                    if known_on_lan(&name) {
+                        .and_then(super::parse_peer_advertisement)
+                    else {
                         debug!(
-                            "{INNER_NAME}: {name} is already on the LAN, not listing it over BLE"
+                            "{INNER_NAME}: {address} advertises 0xFEF3 but not NearbySharing, \
+                             skipping"
                         );
                         continue;
-                    }
-
-                    // A rotated address for a device already in the list. Point
-                    // its old addresses at this peripheral so the entry the user
-                    // is looking at still works, but don't list it again.
-                    if already_listed(&name) {
-                        remember_peer(&name, &address, &peripheral);
-                        debug!("{INNER_NAME}: {name} reappeared at {address}, refreshed");
-                        continue;
-                    }
-                    remember_peer(&name, &address, &peripheral);
-
-                    let ei = EndpointInfo {
-                        fullname: address.clone(),
-                        id: address.clone(),
-                        name: Some(name),
-                        ip: Some("ble".to_string()),
-                        port: Some(address.clone()),
-                        rtype: Some(DeviceType::from_raw_value(device_type)),
-                        present: Some(true),
-                        qr_match: Some(false),
                     };
-                    info!("{INNER_NAME}: discovered BLE receiver: {ei:?}");
-                    let _ = self.sender.send(ei);
+
+                    match p.name {
+                        // Full form: the name came with it, so publish straight
+                        // away - no connection needed.
+                        Some(name) => {
+                            list_peer(&self.sender, name, p.device_type, &address, &peripheral)
+                        }
+                        // Fast form carries no name, so it has to be read over
+                        // GATT. Do that concurrently: the read costs a connect
+                        // and is bounded at 8s, and inline it stalled the whole
+                        // event loop - one unresponsive device delayed every
+                        // other peer's listing behind it.
+                        None => {
+                            let sender = self.sender.clone();
+                            let peripheral = peripheral.clone();
+                            let address = address.clone();
+                            let endpoint_id = p.endpoint_id;
+                            let device_type = p.device_type;
+                            let in_flight = in_flight.clone();
+                            if let Ok(mut m) = in_flight.lock() {
+                                m.insert(address.clone(), peripheral.clone());
+                            }
+                            identifiers.spawn(async move {
+                                let (name, device_type) =
+                                    match read_peer_advertisement(&peripheral).await {
+                                        Some(v) => v,
+                                        None => (
+                                            format!(
+                                                "Quick Share device ({})",
+                                                String::from_utf8_lossy(&endpoint_id)
+                                            ),
+                                            device_type,
+                                        ),
+                                    };
+                                // Ran to completion, so it closed its own
+                                // connection - nothing for shutdown to clean up.
+                                if let Ok(mut m) = in_flight.lock() {
+                                    m.remove(&address);
+                                }
+                                list_peer(&sender, name, device_type, &address, &peripheral);
+                            });
+                        }
+                    }
                 }
             }
         }
 
+        // Abort any identification still in flight and wait for it to unwind,
+        // so nothing is left opening GATT connections after the scan is over.
+        identifiers.shutdown().await;
+
+        // Release links the aborted tasks were holding. They died at an await,
+        // so their own disconnect never ran.
+        let stranded: Vec<btleplug::platform::Peripheral> = in_flight
+            .lock()
+            .map(|mut m| m.drain().map(|(_, p)| p).collect())
+            .unwrap_or_default();
+        for p in stranded {
+            debug!("{INNER_NAME}: releasing a peripheral left connected by an aborted identify");
+            let _ = p.disconnect().await;
+        }
+
         let _ = self.adapter.stop_scan().await;
+        // Stop retracting through a sender that is no longer being listened to.
+        if let Ok(mut guard) = BLE_SENDER.lock() {
+            *guard = None;
+        }
         Ok(())
     }
 }

@@ -1183,24 +1183,30 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
                     location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeRetry.into(),
                 ),
                 bandwidth_upgrade_retry: Some(BandwidthUpgradeRetryFrame {
-                    // Order is preference. WIFI_HOTSPOT first: over BLE the
-                    // phone's WiFi is off, so its ConnectionRequest omits
-                    // WIFI_LAN and lists [WIFI_DIRECT, WIFI_AWARE,
-                    // WIFI_HOTSPOT, ...]. Hotspot is the one Windows can
-                    // actually host - a plain ssid/password soft-AP the phone
-                    // joins as an ordinary client - whereas Windows can only do
-                    // WIFI_DIRECT_WITH_DEVICE_NAME, which needs Wi-Fi P2P
-                    // device discovery and is what dead-ended on 2026-07-16.
-                    // WIFI_LAN is dropped: claiming it is useless to a peer
-                    // that has no WiFi up.
-                    supported_medium: vec![Medium::WifiHotspot.into(), Medium::WifiDirect.into()],
+                    // Claim only what we will actually offer.
+                    //
+                    // WIFI_HOTSPOT is the one Windows can host usefully - a
+                    // plain ssid/password soft-AP the peer joins as an ordinary
+                    // client. WIFI_DIRECT used to be claimed here as well, but
+                    // the offer for it is gated off by default (the peer's join
+                    // of a Windows group leaves its P2P state wedged at
+                    // [2]BUSY), so claiming it invited the peer to negotiate a
+                    // medium we would then never offer. That is the same
+                    // mismatch this list was corrected for once before, in the
+                    // other direction.
+                    //
+                    // WIFI_LAN is not claimed either: this path is only reached
+                    // over BLE, where the peer has told us it has no WiFi LAN.
+                    // When it does have one, the LAN offer is made directly and
+                    // none of this runs.
+                    supported_medium: vec![Medium::WifiHotspot.into()],
                     is_request: Some(false),
                 }),
                 ..Default::default()
             }),
         };
         self.encrypt_and_send(&frame).await?;
-        info!("Bandwidth upgrade: replied with supported mediums [WIFI_HOTSPOT, WIFI_DIRECT]");
+        info!("Bandwidth upgrade: replied with supported mediums [WIFI_HOTSPOT]");
         Ok(())
     }
 

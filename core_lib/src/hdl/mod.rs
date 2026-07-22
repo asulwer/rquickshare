@@ -36,6 +36,13 @@ pub use blea_recv_win::*;
 mod ble_receiver;
 #[cfg(feature = "experimental")]
 pub use ble_receiver::{parse_full_advertisement, parse_peer_advertisement};
+// Reads the negotiated ATT MTU, which btleplug does not expose. Windows-only
+// because it goes to WinRT for it; the send path falls back to a conservative
+// packet size everywhere else.
+#[cfg(all(feature = "experimental", target_os = "windows"))]
+mod ble_mtu_win;
+#[cfg(all(feature = "experimental", target_os = "windows"))]
+pub use ble_mtu_win::*;
 // BLE *client* half of the Weave socket, for sending to a phone with WiFi off.
 // btleplug rather than WinRT, so this one works on Linux too.
 #[cfg(feature = "experimental")]

@@ -34,8 +34,57 @@ const BLE_SOCKET_SERVER_TX_UUID: Uuid = uuid!("00000100-0004-1000-8000-001a11000
 /// SHA-256("NearbySharing")[:3].
 const NEARBY_SHARING_HASH: [u8; 3] = [0xfc, 0x9f, 0x5e];
 
-/// 512-byte ATT MTU ceiling minus the 3-byte ATT header.
+/// 512-byte ATT MTU ceiling minus the 3-byte ATT header. An upper bound on what
+/// we may ask for, never a value to ask for on its own - see `proposed_packet_size`.
 const MAX_PACKET_SIZE: u16 = 509;
+
+/// What to ask for when the negotiated MTU cannot be read.
+///
+/// The 23-byte MTU every LE link must support, minus the ATT header. Slow, but
+/// it is the only size guaranteed to arrive, and a slow transfer beats a
+/// handshake that dies. Platforms that can report the real MTU never use this.
+const FALLBACK_PACKET_SIZE: u16 = 20;
+
+/// The largest packet we can honestly say we are able to receive.
+///
+/// Weave has each side state its maximum and the peer sends notifications up to
+/// that size, so this number is a promise about the link, not a preference.
+/// Claiming the 509-byte ceiling on a link that negotiated less does not fail
+/// here - the stack fragments our writes for us - it fails at the peer, whose
+/// oversized notification dies with GATT status 133 and takes the Weave socket
+/// with it, mid-UKEY2, with no prompt ever shown.
+async fn proposed_packet_size(peripheral: &Peripheral) -> u16 {
+    // A hook to override this size once existed, to test whether the handshake
+    // failures were about notification size. They are not: the handshake failed
+    // and succeeded identically at 509 B and at 100 B. Removed rather than left
+    // lying around, since it answers a question that has been answered.
+    #[cfg(target_os = "windows")]
+    {
+        let addr = peripheral.address().into_inner();
+        let address = u64::from_be_bytes([
+            0, 0, addr[0], addr[1], addr[2], addr[3], addr[4], addr[5],
+        ]);
+        match crate::hdl::negotiated_att_mtu(address).await {
+            Some(mtu) => {
+                let size = mtu.saturating_sub(3).min(MAX_PACKET_SIZE);
+                info!("{INNER_NAME}: link negotiated a {mtu} B ATT MTU; proposing {size} B packets");
+                size
+            }
+            None => {
+                warn!(
+                    "{INNER_NAME}: could not read the negotiated ATT MTU; proposing \
+                     {FALLBACK_PACKET_SIZE} B packets, which every LE link can carry"
+                );
+                FALLBACK_PACKET_SIZE
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = peripheral;
+        MAX_PACKET_SIZE
+    }
+}
 
 /// Sanity bound on a frame length, matching the rest of the stack.
 const SANE_FRAME_LENGTH: usize = 5 * 1024 * 1024;
@@ -52,6 +101,14 @@ pub struct BleChannel {
     pub upgrade_tx: tokio::sync::mpsc::UnboundedSender<tokio::net::TcpStream>,
     /// Signals that the old channel is released and the stream may move.
     pub switch_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    /// Fired once the upgraded socket is actually spliced in.
+    ///
+    /// The sender must not write payload between asking for the switch and this
+    /// firing: the peer promotes its own channel as soon as it sees
+    /// CLIENT_INTRODUCTION, so anything still going out over BLE in that window
+    /// is written to a link nobody reads - yet counted as sent, leaving our
+    /// offsets megabytes ahead of what the peer actually received.
+    pub switched: std::sync::Arc<tokio::sync::Notify>,
 }
 
 /// The multiplex ConnectionRequest the peer expects before any Nearby data.
@@ -140,17 +197,28 @@ pub async fn open(peripheral: Peripheral) -> Result<BleChannel, anyhow::Error> {
 
     // Weave ConnectionRequest. Counter 0 - control and data share one counter
     // per direction, which the receive path learned the hard way.
+    let proposed = proposed_packet_size(&peripheral).await;
     let request = [
         0x80,
         0x00,
         0x01,
         0x00,
         0x01,
-        (MAX_PACKET_SIZE >> 8) as u8,
-        MAX_PACKET_SIZE as u8,
+        (proposed >> 8) as u8,
+        proposed as u8,
     ];
+    // WithResponse, like every write after it.
+    //
+    // This was the one fire-and-forget write in the session, and it is the
+    // *first* - a write command carries no delivery or ordering guarantee, so
+    // it can be dropped or overtaken by the acknowledged writes that follow,
+    // misaligning the peer's Weave stream from the very first byte. The phone
+    // then discards a frame with "Protocol message contained an invalid tag
+    // (zero)" and the handshake dies without ever prompting the user. It also
+    // matches the shape of the failures: the *first* connection is the flaky
+    // one.
     peripheral
-        .write(&client_tx, &request, WriteType::WithoutResponse)
+        .write(&client_tx, &request, WriteType::WithResponse)
         .await?;
     info!("{INNER_NAME}: sent Weave ConnectionRequest");
 
@@ -170,7 +238,9 @@ pub async fn open(peripheral: Peripheral) -> Result<BleChannel, anyhow::Error> {
         }
         match header & 0x0f {
             1 if n.value.len() >= 5 => {
-                let size = u16::from_be_bytes([n.value[3], n.value[4]]).min(MAX_PACKET_SIZE);
+                // Clamp to what we proposed, not to the ceiling: the peer must
+                // not send us packets larger than we said we could receive.
+                let size = u16::from_be_bytes([n.value[3], n.value[4]]).min(proposed);
                 info!("{INNER_NAME}: Weave ConnectionConfirm, packet size {size}");
                 break size;
             }
@@ -195,6 +265,8 @@ pub async fn open(peripheral: Peripheral) -> Result<BleChannel, anyhow::Error> {
     let (upgrade_tx, mut upgrade_rx) =
         tokio::sync::mpsc::unbounded_channel::<tokio::net::TcpStream>();
     let (switch_tx, mut switch_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let switched = std::sync::Arc::new(tokio::sync::Notify::new());
+    let pump_switched = switched.clone();
 
     // One task, not two.
     //
@@ -212,6 +284,16 @@ pub async fn open(peripheral: Peripheral) -> Result<BleChannel, anyhow::Error> {
         let mut hash = NEARBY_SHARING_HASH;
         let mut pending: Vec<u8> = Vec::new();
         let mut acc: Vec<u8> = Vec::new();
+        // The peer's Weave counter, so a dropped packet is caught rather than
+        // spliced silently into the middle of a reassembled frame. The peer's
+        // ConnectionConfirm was its counter 0, so its data starts at 1.
+        //
+        // Without this a lost packet is invisible here and surfaces far away as
+        // "SecureMessage.header_and_body: invalid wire type" - a protobuf error
+        // for what is really a hole in the byte stream. Measured seven seconds
+        // after the WiFi Direct association came up, which is the moment BLE
+        // starts contending with WiFi for the 2.4 GHz radio.
+        let mut peer_counter: u8 = 1;
         let mut upgraded: Option<tokio::net::TcpStream> = None;
         // A Quick Share receiver answers our multiplex ConnectionRequest. One
         // that completes the handshake then closes without a word is
@@ -236,6 +318,22 @@ pub async fn open(peripheral: Peripheral) -> Result<BleChannel, anyhow::Error> {
                     };
                     pending.extend_from_slice(&buf[..n]);
 
+                    // Keep transmitting even once the upgraded socket is in
+                    // hand, right up until the switch is asked for.
+                    //
+                    // Tempting to hold everything back here the moment the
+                    // socket lands, on the grounds that the peer has already
+                    // promoted its channel. It is wrong: LAST_WRITE_TO_PRIOR
+                    // _CHANNEL has to go out over *this* channel, and holding it
+                    // back carried it onto the upgraded socket instead, where
+                    // the peer never saw it - so the peer sat waiting for the
+                    // old channel to be released, never started reading payload,
+                    // and reset the WiFi socket 65s later. The sender stops
+                    // writing payload on its own between LAST_WRITE and the
+                    // peer's SAFE_TO_CLOSE, which is the right place for that
+                    // decision: it knows which frames are protocol and which are
+                    // payload, and down here it is all opaque ciphertext.
+                    //
                     // Send whole frames only. Nothing is read while a frame is
                     // going out, because send_weave awaits each acknowledged
                     // write - that is the backpressure.
@@ -256,6 +354,28 @@ pub async fn open(peripheral: Peripheral) -> Result<BleChannel, anyhow::Error> {
                         msg.extend_from_slice(&pending[..4 + len]);
                         pending.drain(..4 + len);
 
+                        // One log line per multiplex message actually emitted,
+                        // with the counter it goes out under and how many Weave
+                        // packets it will take.
+                        //
+                        // The peer discarded a frame with "invalid tag (zero)",
+                        // and the only zero bytes this side emits are the
+                        // four-byte length prefix - so at that moment the peer
+                        // was reading our prefix as frame content, four bytes
+                        // out of step. Whether that is one message emitted as
+                        // two, two merged into one, or a lost packet cannot be
+                        // told from the duplex side alone; this counts what
+                        // leaves, so it can be matched against what the peer
+                        // reads.
+                        trace!(
+                            "{INNER_NAME}: mux out: {} B total, declared len {len}, counter {}, \
+                             {} packet(s), beginning {:02x?}",
+                            msg.len(),
+                            counter,
+                            msg.len().div_ceil(max_payload),
+                            &msg[..msg.len().min(16)]
+                        );
+
                         if let Err(e) = send_weave(
                             &peripheral, &client_tx, &msg, &mut counter, max_payload,
                         ).await {
@@ -272,6 +392,18 @@ pub async fn open(peripheral: Peripheral) -> Result<BleChannel, anyhow::Error> {
                         continue;
                     }
                     let header = n.value[0];
+
+                    // Check the counter before anything else: it is 3 bits, it
+                    // wraps, and control and data share one sequence per
+                    // direction - so a control packet consumes one too and
+                    // skipping it here would desynchronise the check itself.
+                    let got = (header >> 4) & 0x07;
+                    let expected = peer_counter;
+                    let lost = got != expected;
+                    // Resynchronise on what actually arrived, so one lost packet
+                    // costs one frame rather than every frame after it.
+                    peer_counter = (got + 1) & 0x07;
+
                     if header & 0x80 != 0 {
                         // Weave has no graceful close, so a completed transfer
                         // ends with an Error just as a failed one does.
@@ -279,6 +411,19 @@ pub async fn open(peripheral: Peripheral) -> Result<BleChannel, anyhow::Error> {
                             info!("{INNER_NAME}: peer closed the Weave connection");
                             break;
                         }
+                        continue;
+                    }
+
+                    if lost {
+                        // Reassembling across a hole produces bytes that are not
+                        // a frame at all. Say so here, where it is a lost BLE
+                        // packet, instead of letting it become an unexplained
+                        // protobuf failure several layers up.
+                        warn!(
+                            "{INNER_NAME}: lost a Weave packet from the peer (expected counter \
+                             {expected}, got {got}); dropping the partial frame"
+                        );
+                        acc.clear();
                         continue;
                     }
 
@@ -304,6 +449,33 @@ pub async fn open(peripheral: Peripheral) -> Result<BleChannel, anyhow::Error> {
                         );
                         continue;
                     }
+                    // Sanity-check the frame length that follows the service
+                    // hash before handing anything up.
+                    //
+                    // A reassembled message is [3-byte hash][4-byte length]
+                    // [frame]. If that length is not plausible then this is not
+                    // a data frame at all and forwarding it puts bytes into the
+                    // protobuf layer that were never a frame - which is how a
+                    // stray multiplex control frame surfaced far away as
+                    // "SecureMessage.header_and_body: invalid wire type: Varint",
+                    // 0x08 being the first byte of a control body rather than
+                    // the 0x0A that starts a SecureMessage. Report it here, with
+                    // the bytes, where it can still be identified.
+                    if msg.len() >= 7 {
+                        let len =
+                            u32::from_be_bytes([msg[3], msg[4], msg[5], msg[6]]) as usize;
+                        if len == 0 || len > SANE_FRAME_LENGTH || len > msg.len() - 7 {
+                            warn!(
+                                "{INNER_NAME}: inbound frame is not a data frame - declared \
+                                 length {len} against {} B of body; dropping. First bytes: \
+                                 {:02x?}",
+                                msg.len().saturating_sub(7),
+                                &msg[..msg.len().min(32)]
+                            );
+                            continue;
+                        }
+                    }
+
                     if hash != msg[..3] {
                         let learned: [u8; 3] = [msg[0], msg[1], msg[2]];
                         info!(
@@ -352,21 +524,53 @@ pub async fn open(peripheral: Peripheral) -> Result<BleChannel, anyhow::Error> {
                                 pending.clear();
                             }
 
-                            // Do NOT close BLE here - it strands the transfer.
+                            // Close the multiplex *service channel*, and only
+                            // that. The GATT link stays up.
                             //
-                            // Tried it on the theory that the phone waits for the
-                            // weave socket to disconnect; the opposite happened.
-                            // Closing BLE right after the switch tore the phone's
-                            // weave socket down (its "onDisconnected callback"
-                            // fires, then a GATT connection timeout) and it never
-                            // started reading the WiFi socket - the transfer
-                            // froze at exactly the bytes BLE had delivered
-                            // (98 KB). The runs that completed at 6 MB/s kept BLE
-                            // open. Leave it; it is dropped at pump end as usual.
+                            // The peer promotes its endpoint channel the moment
+                            // it reads CLIENT_INTRODUCTION, but its reader keeps
+                            // draining the old channel until that channel ends -
+                            // its log shows "replaced endpoint's channel from
+                            // ENCRYPTED_BLE to ENCRYPTED_WIFI_HOTSPOT", then
+                            // KEEP_ALIVE frames still arriving "on channel
+                            // ENCRYPTED_BLE" afterwards, and then nothing at all
+                            // once we splice: sixty seconds of silence and
+                            // "Time's up!" with bytesReceived stuck at the 98304
+                            // BLE had delivered. Leaving the channel open is
+                            // what strands it.
+                            //
+                            // An earlier attempt to close "BLE" dropped the GATT
+                            // connection outright, which tore down the peer's
+                            // Weave socket and failed the same way for the
+                            // opposite reason. The distinction matters: this
+                            // sends the multiplex DISCONNECT for our service and
+                            // nothing more. The frame is the one the peer itself
+                            // sends when it closes a service on us, observed as
+                            // 00 00 00 08 02 1a 05 0a 03 <hash> - control prefix,
+                            // command 2, then the service hash.
+                            let mut disconnect = vec![0x00, 0x00, 0x00, 0x08, 0x02, 0x1a, 0x05,
+                                                     0x0a, 0x03];
+                            disconnect.extend_from_slice(&hash);
+                            if let Err(e) = send_weave(
+                                &peripheral, &client_tx, &disconnect, &mut counter, max_payload,
+                            ).await {
+                                warn!("{INNER_NAME}: could not close the multiplex channel: {e}");
+                            } else {
+                                info!(
+                                    "{INNER_NAME}: closed the multiplex channel for {hash:02x?}; \
+                                     the GATT link stays up"
+                                );
+                            }
 
                             // Rejoin the halves: TCP framing is exactly what is
                             // already flowing, so nothing needs translating.
                             let mut joined = tokio::io::join(far_rd, far_wr);
+
+                            // The splice is live from here. Release the sender,
+                            // which has been holding payload back precisely so
+                            // nothing was written to BLE after the peer stopped
+                            // reading it.
+                            pump_switched.notify_waiters();
                             match tokio::io::copy_bidirectional(&mut sock, &mut joined).await {
                                 Ok((from_peer, to_peer)) => info!(
                                     "{INNER_NAME}: upgraded socket closed \
@@ -407,6 +611,7 @@ pub async fn open(peripheral: Peripheral) -> Result<BleChannel, anyhow::Error> {
         stream: near,
         upgrade_tx,
         switch_tx,
+        switched,
     })
 }
 
