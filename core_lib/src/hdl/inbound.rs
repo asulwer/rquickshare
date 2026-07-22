@@ -81,18 +81,61 @@ const SANITY_DURATION: Duration = Duration::from_micros(10);
 /// `tokio::net::TcpStream`.
 #[derive(Debug)]
 pub struct InboundRequest<S> {
-    socket: S,
+    /// Write half only. Reading happens in a separate task - see `frames` and
+    /// `frame_reader` for why.
+    socket: tokio::io::WriteHalf<S>,
+    /// Frames as they came off the wire, still encrypted. Fed by a reader task
+    /// so no read is ever cancelled by `select!`.
+    frames: tokio::sync::mpsc::Receiver<crate::hdl::RawFrame>,
     pub state: InnerState,
     sender: Sender<ChannelMessage>,
     receiver: Receiver<ChannelMessage>,
+    /// Held so the WiFi Direct group lives exactly as long as this transfer and
+    /// is torn down with it. The hotspot path instead did `mem::forget`, and
+    /// because tethering is *system* state the AP then survived the process and
+    /// stayed on across restarts - don't repeat that.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    wifi_direct: Option<crate::hdl::WindowsWifiDirect>,
+    /// Credentials read off the group when it started, so the offer frame can be
+    /// built later. Set together with `wifi_direct`.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    wifi_direct_creds: Option<crate::hdl::WifiDirectCreds>,
+    /// Where to hand the upgraded socket once the phone has introduced itself.
+    /// The BLE bridge sets this and then splices the socket into the stream in
+    /// place of the Weave transport; unset elsewhere, where there is nothing to
+    /// upgrade from.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    upgrade_tx: Option<tokio::sync::mpsc::UnboundedSender<tokio::net::TcpStream>>,
+    /// Signals the bridge that SAFE_TO_CLOSE_PRIOR_CHANNEL has gone out and the
+    /// stream may now move onto the upgraded socket.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    switch_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+    /// Whether the peer advertised WIFI_LAN, i.e. it is already on a network.
+    /// Offering such a peer our soft-AP asks it to abandon that network, which
+    /// google/nearby refuses outright ("this will destroy WIFI_LAN").
+    peer_has_wifi_lan: bool,
+    /// When we last answered a KeepAlive, so redundant responses can be skipped.
+    /// Not transport-specific, but it matters on BLE: see the KeepAlive arm.
+    last_keepalive_response: Option<std::time::Instant>,
+    /// Soft-AP for the WIFI_HOTSPOT upgrade, held for the life of the transfer
+    /// so tethering is torn down with the request rather than left running.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    hotspot: Option<crate::hdl::WindowsHotspot>,
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    hotspot_creds: Option<crate::hdl::HotspotCredentials>,
 }
 
-impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
+impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
     pub fn new(socket: S, id: String, sender: Sender<ChannelMessage>) -> Self {
         let receiver = sender.subscribe();
+        // Split so reads happen in their own task. See `frame_reader` - a read
+        // raced against the channel in `select!` loses bytes when cancelled.
+        let (reader, writer) = tokio::io::split(socket);
+        let frames = crate::hdl::spawn_frame_reader(reader, SANE_FRAME_LENGTH as usize);
 
         Self {
-            socket,
+            socket: writer,
+            frames,
             state: InnerState {
                 id,
                 server_seq: 0,
@@ -103,13 +146,36 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
             },
             sender,
             receiver,
+            #[cfg(all(feature = "experimental", target_os = "windows"))]
+            wifi_direct: None,
+            #[cfg(all(feature = "experimental", target_os = "windows"))]
+            wifi_direct_creds: None,
+            peer_has_wifi_lan: false,
+            last_keepalive_response: None,
+            #[cfg(all(feature = "experimental", target_os = "windows"))]
+            upgrade_tx: None,
+            #[cfg(all(feature = "experimental", target_os = "windows"))]
+            switch_tx: None,
+            #[cfg(all(feature = "experimental", target_os = "windows"))]
+            hotspot: None,
+            #[cfg(all(feature = "experimental", target_os = "windows"))]
+            hotspot_creds: None,
         }
     }
 
-    pub async fn handle(&mut self) -> Result<(), anyhow::Error> {
-        // Buffer for the 4-byte length
-        let mut length_buf = [0u8; 4];
+    /// Where to deliver the upgraded socket once the peer has introduced itself
+    /// on it. Only the BLE bridge can adopt one today.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    pub fn set_upgrade_sink(
+        &mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<tokio::net::TcpStream>,
+        switch_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    ) {
+        self.upgrade_tx = Some(tx);
+        self.switch_tx = Some(switch_tx);
+    }
 
+    pub async fn handle(&mut self) -> Result<(), anyhow::Error> {
         tokio::select! {
             i = self.receiver.recv() => {
                 match i {
@@ -160,28 +226,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
                     }
                 }
             },
-            h = stream_read_exact(&mut self.socket, &mut length_buf) => {
-                h?;
-
-                self._handle(length_buf).await?
+            // Both branches are channel receives, and both are cancel-safe.
+            // Whichever loses simply hasn't consumed its message yet.
+            frame = self.frames.recv() => {
+                match frame {
+                    Some(frame_data) => self._handle(frame_data).await?,
+                    // The reader task ended: the transport is finished.
+                    None => return Err(anyhow!(std::io::Error::from(
+                        std::io::ErrorKind::UnexpectedEof
+                    ))),
+                }
             }
         }
 
         Ok(())
     }
 
-    pub async fn _handle(&mut self, length_buf: [u8; 4]) -> Result<(), anyhow::Error> {
-        let msg_length = u32::from_be_bytes(length_buf) as usize;
-        // Ensure the message length is not unreasonably big to avoid allocation attacks
-        if msg_length > SANE_FRAME_LENGTH as usize {
-            error!("Message length too big");
-            return Err(anyhow!("value"));
-        }
-
-        // Allocate buffer for the actual message and read it
-        let mut frame_data = vec![0u8; msg_length];
-        stream_read_exact(&mut self.socket, &mut frame_data).await?;
-
+    pub async fn _handle(&mut self, frame_data: Vec<u8>) -> Result<(), anyhow::Error> {
         let current_state = &self.state;
         // Now determine what will be the request type based on current state
         match current_state.state {
@@ -252,7 +313,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
     }
 
     fn process_connection_request(
-        &self,
+        &mut self,
         frame: &location_nearby_connections::OfflineFrame,
     ) -> Result<RemoteDeviceInfo, anyhow::Error> {
         let v1_frame = frame
@@ -272,6 +333,54 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
             .connection_request
             .as_ref()
             .ok_or_else(|| anyhow!("Missing required fields"))?;
+
+        // Per grishka's PROTOCOL.md the client states the mediums it will accept
+        // here, and the server is meant to intersect them with its own. If this
+        // list is just [WIFI_LAN] then a WIFI_HOTSPOT upgrade was never in the
+        // agreed set, and every offer we've made was outside the negotiation.
+        // Medium: 1=MDNS 2=BLUETOOTH 3=WIFI_HOTSPOT 4=BLE 5=WIFI_LAN
+        //         6=WIFI_AWARE 7=NFC 8=WIFI_DIRECT 9=WEB_RTC 10=BLE_L2CAP 11=USB
+        info!(
+            "ConnectionRequest: mediums (raw) = {:?}",
+            connection_request.mediums
+        );
+        // 5 = WIFI_LAN. Remember whether the peer already has a network, because
+        // offering it a soft-AP would mean asking it to leave one.
+        self.peer_has_wifi_lan = connection_request.mediums.contains(&5);
+
+        // The phone states, unprompted, which channels it can actually use as a
+        // WiFi Direct *client* - and the frequency of the AP it's sitting on.
+        // That's ground truth for whether our group owner is even reachable:
+        // a single-radio phone can only follow us to a channel it lists here,
+        // and `ap_frequency` tells us the channel it's already committed to.
+        // Every previous guess about the radio came from our side of the link;
+        // this comes from the phone's.
+        if let Some(meta) = &connection_request.medium_metadata {
+            info!(
+                "ConnectionRequest: medium_metadata: ap_frequency={:?} supports_5ghz={:?} \
+                 supports_6ghz={:?} wifi_direct_cli_usable_channels={:?} available_channels={:?}",
+                meta.ap_frequency,
+                meta.supports_5_ghz,
+                meta.supports_6_ghz,
+                meta.wifi_direct_cli_usable_channels
+                    .as_ref()
+                    .map(|c| &c.channels),
+                meta.available_channels.as_ref().map(|c| &c.channels),
+            );
+            // The decisive field, and we had it all along without reading it.
+            // 1 = WIFI_DIRECT_WITH_PASSWORD (ssid/password - "Android supports
+            // this type, but Windows does not"), 3 = WIFI_DIRECT_WITH_DEVICE_NAME.
+            // The phone rejected our device_name-only offer with "missing ssid or
+            // not in correct format", so either it doesn't list 3 here - in which
+            // case this peer cannot do the only type Windows can host - or it
+            // does, and we are failing to signal that we're using it.
+            info!(
+                "ConnectionRequest: supported_wifi_direct_auth_types={:?} medium_role={:?}",
+                meta.supported_wifi_direct_auth_types, meta.medium_role,
+            );
+        } else {
+            info!("ConnectionRequest: no medium_metadata sent");
+        }
 
         let endpoint_info = connection_request
             .endpoint_info
@@ -463,6 +572,44 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
             )));
         }
 
+        // Announce the WiFi Direct device name up front, so the peer knows what
+        // to look for if it later asks for a WIFI_DIRECT upgrade. That flow is
+        // device-name discovery (the only type Windows can host), and this field
+        // is how the group owner declares its name - google's Windows client
+        // fills it in here, in the connection response, long before any upgrade
+        // is negotiated. Must match what `WindowsWifiDirect::start` advertises:
+        // the uppercased computer name.
+        #[cfg(all(feature = "experimental", target_os = "windows"))]
+        let wifi_direct_device_name = ::hostname::get()
+            .ok()
+            .map(|h| h.to_string_lossy().to_uppercase());
+        #[cfg(not(all(feature = "experimental", target_os = "windows")))]
+        let wifi_direct_device_name: Option<String> = None;
+
+        // Report the OS we actually are.
+        //
+        // This said LINUX unconditionally - inherited from upstream, which is a
+        // Linux project. That is not cosmetic: the proto ties WiFi Direct auth
+        // type to OS ("Android supports this type, but Windows does not"), so
+        // claiming Linux while offering a `device_name` credential is an
+        // incoherent pair - a Linux peer would be expected to offer
+        // ssid/password. On 2026-07-16 the phone responded to exactly that
+        // combination with *silence*: it took the offer and never attempted a
+        // join, where every ssid/password attempt at least tried and failed
+        // loudly.
+        //
+        // Safe against `bwu_manager.cc`'s guard, which refuses WIFI_DIRECT when
+        // `client->GetLocalOsInfo().type() == WINDOWS`: `GetLocalOsInfo` is the
+        // *phone's own* OS (`client_proxy.h` keeps `local_os_info_` separate
+        // from `GetRemoteOsInfo`), so it reads ANDROID there regardless of what
+        // we claim.
+        #[cfg(target_os = "windows")]
+        let os_type = location_nearby_connections::os_info::OsType::Windows;
+        #[cfg(target_os = "macos")]
+        let os_type = location_nearby_connections::os_info::OsType::Apple;
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let os_type = location_nearby_connections::os_info::OsType::Linux;
+
         let response = location_nearby_connections::OfflineFrame {
 			version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
 			v1: Some(location_nearby_connections::V1Frame {
@@ -470,8 +617,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
 				connection_response: Some(location_nearby_connections::ConnectionResponseFrame {
 					response: Some(location_nearby_connections::connection_response_frame::ResponseStatus::Accept.into()),
 					os_info: Some(location_nearby_connections::OsInfo {
-						r#type: Some(location_nearby_connections::os_info::OsType::Linux.into())
+						r#type: Some(os_type.into())
 					}),
+					wifi_direct_device_name,
 					..Default::default()
 				}),
 				..Default::default()
@@ -495,6 +643,575 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
 
         self.send_encrypted_frame(&paired_encryption).await?;
 
+        Ok(())
+    }
+
+    /// Offer a WIFI_DIRECT bandwidth upgrade: start a group and hand the peer
+    /// its credentials.
+    ///
+    /// This is the medium to use from a WiFi-LAN connection. google/nearby's
+    /// `bwu_manager.cc` rejects WIFI_HOTSPOT outright while WiFi-LAN is up ("this
+    /// will destroy WIFI_LAN"), but only rejects WIFI_DIRECT when the *client* is
+    /// Windows - and ours is the phone. See TODO.md.
+    /// Bring up the WiFi Direct group owner and start listening, *without*
+    /// sending the offer. Idempotent - a second call is a no-op.
+    ///
+    /// Split out from the offer so the group can be started early, at
+    /// `WaitingForUserConsent`, seconds before the phone is asked to join.
+    /// logcat showed the phone attempting P2P group formation *before* its
+    /// `P2P-DEVICE-FOUND` for us landed - i.e. we were structurally too late,
+    /// the group not yet discoverable when the peer first tried. google's
+    /// handler likewise starts the GO and begins accepting connections before it
+    /// builds the frame.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    async fn ensure_wifi_direct_group(&mut self) -> Result<(), anyhow::Error> {
+        if self.wifi_direct.is_some() {
+            debug!("Bandwidth upgrade: WiFi Direct group already up");
+            return Ok(());
+        }
+
+        let port: u16 = 8899;
+
+        // On a blocking thread: the WinRT calls take seconds, and stalling the
+        // async executor breaks the in-flight handshake frames - that's what
+        // caused the "Missing required fields (ReceivedPairedKeyResult)" failures
+        // when the hotspot was first wired in.
+        let (handle, creds) = match tokio::task::spawn_blocking(
+            crate::hdl::WindowsWifiDirect::start,
+        )
+        .await
+        {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                warn!("Bandwidth upgrade: WiFi Direct start failed: {e}");
+                return Ok(());
+            }
+            Err(e) => {
+                warn!("Bandwidth upgrade: WiFi Direct task join failed: {e}");
+                return Ok(());
+            }
+        };
+
+        info!(
+            "Bandwidth upgrade: WiFi Direct group up (device_name={}, ssid={}, gateway={}, port={})",
+            creds.device_name, creds.ssid, creds.gateway, port
+        );
+
+        // Keep the group and its credentials alive for the transfer.
+        self.wifi_direct = Some(handle);
+        self.wifi_direct_creds = Some(creds);
+
+        // Wait for the phone to join the group and introduce itself. A join
+        // arrives from the P2P subnet - anything from the LAN subnet (192.168.1.x)
+        // is the phone still talking over WiFi-LAN and is *not* evidence the
+        // upgrade worked.
+        tokio::spawn(async move {
+            match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
+                Ok(l) => {
+                    info!("Bandwidth upgrade: listening on 0.0.0.0:{port}");
+                    match l.accept().await {
+                        Ok((s, addr)) => {
+                            info!("*** Bandwidth upgrade: phone connected from {addr} ***");
+                            if let Err(e) = introduce_upgraded_channel(s).await {
+                                warn!("Bandwidth upgrade: introduction failed: {e}");
+                            }
+                        }
+                        Err(e) => warn!("Bandwidth upgrade: accept failed: {e}"),
+                    }
+                }
+                Err(e) => warn!("Bandwidth upgrade: bind failed: {e}"),
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Our IPv4 on the local network, for a WIFI_LAN upgrade offer.
+    ///
+    /// Skips loopback, link-local, and the 192.168.137.0/24 tethering subnet -
+    /// that one is our own soft-AP, which a peer already on the LAN cannot reach
+    /// and must not be told to use.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    fn lan_ipv4() -> Option<std::net::Ipv4Addr> {
+        get_if_addrs::get_if_addrs().ok()?.into_iter().find_map(|i| {
+            match i.ip() {
+                std::net::IpAddr::V4(v4)
+                    if !v4.is_loopback()
+                        && !v4.is_link_local()
+                        && !(v4.octets()[0] == 192
+                            && v4.octets()[1] == 168
+                            && v4.octets()[2] == 137) =>
+                {
+                    Some(v4)
+                }
+                _ => None,
+            }
+        })
+    }
+
+    /// Offer WIFI_LAN: the peer is already on our network, so just tell it where
+    /// to connect.
+    ///
+    /// This is the right upgrade for a phone that reached us over BLE while
+    /// having WiFi on - which happens, because we advertise as a receiver over
+    /// both mDNS and BLE and the phone picks. A hotspot is wrong there (it would
+    /// have to leave its network, which google/nearby refuses), but leaving it
+    /// on BLE means 20 KB/s and the ~1 MB indication-timeout wall. Nothing has
+    /// to be brought up: the network already exists.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    async fn offer_wifi_lan_upgrade(&mut self) -> Result<(), anyhow::Error> {
+        use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::{
+            upgrade_path_info::{Medium, WifiLanSocket},
+            EventType, UpgradePathInfo,
+        };
+        use crate::location_nearby_connections::BandwidthUpgradeNegotiationFrame;
+
+        let Some(ip) = Self::lan_ipv4() else {
+            warn!("Bandwidth upgrade: no LAN address to offer; staying on the prior channel");
+            return Ok(());
+        };
+
+        let port: u16 = 8899;
+        self.ensure_upgrade_listener(port).await;
+
+        let frame = OfflineFrame {
+            version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
+            v1: Some(location_nearby_connections::V1Frame {
+                r#type: Some(
+                    location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation
+                        .into(),
+                ),
+                bandwidth_upgrade_negotiation: Some(BandwidthUpgradeNegotiationFrame {
+                    event_type: Some(EventType::UpgradePathAvailable.into()),
+                    upgrade_path_info: Some(UpgradePathInfo {
+                        medium: Some(Medium::WifiLan.into()),
+                        wifi_lan_socket: Some(WifiLanSocket {
+                            // Network byte order, per the proto comment.
+                            ip_address: Some(ip.octets().to_vec()),
+                            wifi_port: Some(port as i32),
+                        }),
+                        supports_client_introduction_ack: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        };
+
+        self.encrypt_and_send(&frame).await?;
+        info!("Bandwidth upgrade: offered WIFI_LAN ({ip}:{port})");
+        Ok(())
+    }
+
+    /// Accept the upgraded channel on `port`, introduce it, and hand it to the
+    /// bridge. Shared by the hotspot and WIFI_LAN offers - only the medium and
+    /// credentials differ, never what happens once the peer connects.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    async fn ensure_upgrade_listener(&mut self, port: u16) {
+        let upgrade_tx = self.upgrade_tx.clone();
+        tokio::spawn(async move {
+            match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
+                Ok(l) => {
+                    info!("Bandwidth upgrade: listening on 0.0.0.0:{port}");
+                    let accepted = match tokio::time::timeout(
+                        std::time::Duration::from_secs(45),
+                        l.accept(),
+                    )
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(_) => {
+                            warn!(
+                                "Bandwidth upgrade: no peer connected within 45s; staying on the \
+                                 prior channel"
+                            );
+                            return;
+                        }
+                    };
+                    match accepted {
+                        Ok((s, addr)) => {
+                            info!("*** Bandwidth upgrade: phone connected from {addr} ***");
+                            match introduce_upgraded_channel(s).await {
+                                Ok(sock) => match &upgrade_tx {
+                                    Some(tx) => {
+                                        if tx.send(sock).is_err() {
+                                            warn!(
+                                                "Bandwidth upgrade: nothing left to hand the \
+                                                 upgraded socket to"
+                                            );
+                                        }
+                                    }
+                                    None => warn!(
+                                        "Bandwidth upgrade: introduced, but this transport cannot \
+                                         adopt the upgraded socket"
+                                    ),
+                                },
+                                Err(e) => warn!("Bandwidth upgrade: introduction failed: {e}"),
+                            }
+                        }
+                        Err(e) => warn!("Bandwidth upgrade: accept failed: {e}"),
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => warn!(
+                    "Bandwidth upgrade: port {port} still held by a previous transfer; staying on \
+                     the prior channel"
+                ),
+                Err(e) => warn!("Bandwidth upgrade: bind failed: {e}"),
+            }
+        });
+    }
+
+    /// Bring up the Windows soft-AP and start accepting the upgraded channel,
+    /// without sending the offer. Idempotent.
+    ///
+    /// Same shape as `ensure_wifi_direct_group`, and for the same reason: start
+    /// the medium and begin accepting *before* the offer goes out, because the
+    /// phone acts on the frame immediately.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    async fn ensure_hotspot(&mut self) -> Result<(), anyhow::Error> {
+        if self.hotspot.is_some() {
+            debug!("Bandwidth upgrade: hotspot already up");
+            return Ok(());
+        }
+
+        let port: u16 = 8899;
+
+        // SSID/passphrase are per-session. The phone only ever learns them from
+        // the credentials frame, so they don't need to be memorable - but they
+        // do need to be WPA2-legal: 8..=63 characters.
+        let suffix: String = rand::rng()
+            .sample_iter(rand::distr::Alphanumeric)
+            .take(4)
+            .map(char::from)
+            .collect();
+        let ssid = format!("DIRECT-rq{suffix}");
+        let passphrase: String = rand::rng()
+            .sample_iter(rand::distr::Alphanumeric)
+            .take(12)
+            .map(char::from)
+            .collect();
+
+        // On a blocking thread: the WinRT tethering calls take seconds, and
+        // stalling the executor breaks in-flight handshake frames - that is
+        // exactly what produced "Missing required fields
+        // (ReceivedPairedKeyResult)" when the hotspot was first wired in.
+        let (ssid_c, pass_c) = (ssid.clone(), passphrase.clone());
+        let (handle, creds) = match tokio::task::spawn_blocking(move || {
+            crate::hdl::WindowsHotspot::start(&ssid_c, &pass_c)
+        })
+        .await
+        {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                warn!("Bandwidth upgrade: hotspot start failed: {e}");
+                return Ok(());
+            }
+            Err(e) => {
+                warn!("Bandwidth upgrade: hotspot task join failed: {e}");
+                return Ok(());
+            }
+        };
+
+        info!(
+            "Bandwidth upgrade: hotspot up (ssid={}, gateway={}, port={})",
+            creds.ssid, creds.gateway, port
+        );
+
+        self.hotspot = Some(handle);
+        self.hotspot_creds = Some(creds);
+
+        let upgrade_tx = self.upgrade_tx.clone();
+        tokio::spawn(async move {
+            match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
+                Ok(l) => {
+                    info!("Bandwidth upgrade: listening on 0.0.0.0:{port}");
+                    // Bounded. The phone joined in ~5s in every successful run,
+                    // and it abandons the upgrade after ~68s anyway. An
+                    // unbounded accept leaks this task for the life of the
+                    // process and holds port 8899, so one phone that never
+                    // joined would break every subsequent transfer's upgrade.
+                    let accepted =
+                        match tokio::time::timeout(std::time::Duration::from_secs(45), l.accept())
+                            .await
+                        {
+                            Ok(r) => r,
+                            Err(_) => {
+                                warn!(
+                                    "Bandwidth upgrade: no peer joined the hotspot within 45s; \
+                                     staying on the prior channel"
+                                );
+                                return;
+                            }
+                        };
+                    match accepted {
+                        Ok((s, addr)) => {
+                            info!("*** Bandwidth upgrade: phone connected from {addr} ***");
+                            match introduce_upgraded_channel(s).await {
+                                Ok(sock) => match &upgrade_tx {
+                                    Some(tx) => {
+                                        if tx.send(sock).is_err() {
+                                            warn!(
+                                                "Bandwidth upgrade: nothing left to hand the \
+                                                 upgraded socket to"
+                                            );
+                                        }
+                                    }
+                                    // The upgrade completed but no transport can
+                                    // adopt it, so the payload would arrive on a
+                                    // socket nobody reads. Say so rather than
+                                    // dropping it silently.
+                                    None => warn!(
+                                        "Bandwidth upgrade: introduced, but this transport \
+                                         cannot adopt the upgraded socket"
+                                    ),
+                                },
+                                Err(e) => warn!("Bandwidth upgrade: introduction failed: {e}"),
+                            }
+                        }
+                        Err(e) => warn!("Bandwidth upgrade: accept failed: {e}"),
+                    }
+                }
+                // AddrInUse here means a previous transfer's listener is still
+                // holding the port. The transfer still works - it just stays on
+                // the prior channel - so say which it is rather than failing
+                // opaquely.
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => warn!(
+                    "Bandwidth upgrade: port {port} still held by a previous transfer; \
+                     staying on the prior channel"
+                ),
+                Err(e) => warn!("Bandwidth upgrade: bind failed: {e}"),
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Offer WIFI_HOTSPOT. Unlike the WiFi Direct frame this one is
+    /// unambiguous - ssid/password/gateway/port is a plain soft-AP the phone
+    /// joins as an ordinary client, with no P2P device discovery and no
+    /// auth-type incompatibility between GMS versions.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    async fn offer_wifi_hotspot_upgrade(&mut self) -> Result<(), anyhow::Error> {
+        use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::{
+            upgrade_path_info::{Medium, WifiHotspotCredentials},
+            EventType, UpgradePathInfo,
+        };
+        use crate::location_nearby_connections::BandwidthUpgradeNegotiationFrame;
+
+        self.ensure_hotspot().await?;
+
+        let port: u16 = 8899;
+        let creds = match &self.hotspot_creds {
+            Some(c) => c.clone(),
+            None => {
+                warn!("Bandwidth upgrade: no hotspot credentials; soft-AP failed to start");
+                return Ok(());
+            }
+        };
+
+        let frame = OfflineFrame {
+            version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
+            v1: Some(location_nearby_connections::V1Frame {
+                r#type: Some(
+                    location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation
+                        .into(),
+                ),
+                bandwidth_upgrade_negotiation: Some(BandwidthUpgradeNegotiationFrame {
+                    event_type: Some(EventType::UpgradePathAvailable.into()),
+                    upgrade_path_info: Some(UpgradePathInfo {
+                        medium: Some(Medium::WifiHotspot.into()),
+                        wifi_hotspot_credentials: Some(WifiHotspotCredentials {
+                            ssid: Some(creds.ssid.clone()),
+                            password: Some(creds.passphrase.clone()),
+                            port: Some(port as i32),
+                            gateway: Some(creds.gateway.clone()),
+                            // -1 = unspecified. Windows picks the band; naming a
+                            // frequency we don't control is how the WiFi Direct
+                            // attempt misled the peer.
+                            frequency: Some(-1),
+                        }),
+                        supports_client_introduction_ack: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        };
+
+        self.encrypt_and_send(&frame).await?;
+        info!(
+            "Bandwidth upgrade: offered WIFI_HOTSPOT (ssid={}, gateway={}, port={})",
+            creds.ssid, creds.gateway, port
+        );
+
+        Ok(())
+    }
+
+    #[cfg(not(all(feature = "experimental", target_os = "windows")))]
+    async fn offer_wifi_hotspot_upgrade(&mut self) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
+
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    async fn offer_wifi_direct_upgrade(&mut self) -> Result<(), anyhow::Error> {
+        use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::{
+            upgrade_path_info::{Medium, WifiDirectCredentials},
+            EventType, UpgradePathInfo,
+        };
+        use crate::location_nearby_connections::BandwidthUpgradeNegotiationFrame;
+
+        // Start the group if it wasn't started early at WaitingForUserConsent.
+        self.ensure_wifi_direct_group().await?;
+
+        let port: u16 = 8899;
+        let creds = match &self.wifi_direct_creds {
+            Some(c) => c.clone(),
+            None => {
+                warn!("Bandwidth upgrade: no WiFi Direct credentials; group failed to start");
+                return Ok(());
+            }
+        };
+
+        let frame = OfflineFrame {
+            version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
+            v1: Some(location_nearby_connections::V1Frame {
+                r#type: Some(
+                    location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation
+                        .into(),
+                ),
+                bandwidth_upgrade_negotiation: Some(BandwidthUpgradeNegotiationFrame {
+                    event_type: Some(EventType::UpgradePathAvailable.into()),
+                    upgrade_path_info: Some(UpgradePathInfo {
+                        medium: Some(Medium::WifiDirect.into()),
+                        // Send *every* field, exactly as google does:
+                        //   ForBwuWifiDirectPathAvailable(ssid, password, port,
+                        //       freq, disabling_encryption, gateway, device_name, pin)
+                        //
+                        // Two incompatible peers exist and this frame has to
+                        // satisfy both:
+                        //   - Current google/nearby *refuses* ssid/password
+                        //     ("SSID/PASSWORD auth type is not supported") and
+                        //     requires device_name.
+                        //   - The Pixel's shipped GMS 26.26.34 does the reverse:
+                        //     a device-name-only frame is dropped with "missing
+                        //     ssid or not in correct format". The proto says why
+                        //     - device-name on Android is "in the future".
+                        // google populates all of them (ssid/password simply come
+                        // back empty on Windows), so nobody has to choose. We
+                        // stripped them and got silence; don't strip them again.
+                        wifi_direct_credentials: Some(WifiDirectCredentials {
+                            ssid: Some(creds.ssid),
+                            password: Some(creds.passphrase),
+                            gateway: Some(creds.gateway),
+                            device_name: Some(creds.device_name),
+                            // ConfirmOnly pairing: the proto notes pin "is not
+                            // used for WIFI_DIRECT_WITH_DEVICE_NAME, reserve for
+                            // future expansion". google sets it to "".
+                            pin: Some(String::new()),
+                            port: Some(port as i32),
+                            // The frequency the peer should look for our group on.
+                            //
+                            // Do NOT dismiss this as ignored: logcat's "Set P2P
+                            // operating channel to 0" is the phone configuring
+                            // *its own* GO channel, not where it hunts for ours.
+                            // On a fast-connect join Android passes this down to
+                            // the supplicant, and with -1 it has nothing to go on
+                            // - so it falls back to scanning the social channels
+                            // (1/6/11, 2.4GHz) while our group sits on ch157 /
+                            // 5785MHz (measured with a WiFi analyser on the
+                            // phone; Windows exposes no channel through WinRT or
+                            // the WLAN API). It never finds us, which is the 12-14s
+                            // timeout and GROUP_REMOVED with no association.
+                            //
+                            // Override with RQS_WIFI_DIRECT_FREQ to probe values
+                            // without a rebuild. -1 means "unknown" and must be
+                            // sent explicitly: this message declares no proto2
+                            // default, so an absent field reads back as 0.
+                            frequency: Some(
+                                std::env::var("RQS_WIFI_DIRECT_FREQ")
+                                    .ok()
+                                    .and_then(|v| v.parse::<i32>().ok())
+                                    .unwrap_or(-1),
+                            ),
+                            ..Default::default()
+                        }),
+                        // We do answer the introduction (see
+                        // `introduce_upgraded_channel`), so say so. google's GO
+                        // writes the ACK unconditionally, but the *client* only
+                        // waits for one when this is set - leaving it unset and
+                        // then sending an ACK anyway would put a frame on the
+                        // channel the phone isn't expecting to read.
+                        supports_client_introduction_ack: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        };
+        self.encrypt_and_send(&frame).await?;
+        info!("Bandwidth upgrade: sent UPGRADE_PATH_AVAILABLE (WIFI_DIRECT)");
+        Ok(())
+    }
+
+    #[cfg(not(all(feature = "experimental", target_os = "windows")))]
+    async fn offer_wifi_direct_upgrade(&mut self) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
+
+    // Respond to the phone's BANDWIDTH_UPGRADE_RETRY by telling it which mediums
+    // we support, so it can drive the upgrade toward WIFI_DIRECT.
+    //
+    // This claimed [WIFI_HOTSPOT, WIFI_LAN] - left over from the hotspot era, and
+    // wrong in both directions now: it advertises a medium whose code we deleted,
+    // and omits the one we actually offer. The phone announces
+    // [WifiLan, WifiDirect, WifiAware, WifiHotspot, BleL2cap, Bluetooth, Ble, Nfc],
+    // so WIFI_DIRECT is in its set; we were answering with a disjoint claim and
+    // then sending UPGRADE_PATH_AVAILABLE(WIFI_DIRECT) for something we'd never
+    // said we could do.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    async fn send_supported_mediums(&mut self) -> Result<(), anyhow::Error> {
+        use crate::location_nearby_connections::bandwidth_upgrade_retry_frame::Medium;
+        use crate::location_nearby_connections::BandwidthUpgradeRetryFrame;
+
+        let frame = OfflineFrame {
+            version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
+            v1: Some(location_nearby_connections::V1Frame {
+                r#type: Some(
+                    location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeRetry.into(),
+                ),
+                bandwidth_upgrade_retry: Some(BandwidthUpgradeRetryFrame {
+                    // Claim only what we will actually offer.
+                    //
+                    // WIFI_HOTSPOT is the one Windows can host usefully - a
+                    // plain ssid/password soft-AP the peer joins as an ordinary
+                    // client. WIFI_DIRECT used to be claimed here as well, but
+                    // the offer for it is gated off by default (the peer's join
+                    // of a Windows group leaves its P2P state wedged at
+                    // [2]BUSY), so claiming it invited the peer to negotiate a
+                    // medium we would then never offer. That is the same
+                    // mismatch this list was corrected for once before, in the
+                    // other direction.
+                    //
+                    // WIFI_LAN is not claimed either: this path is only reached
+                    // over BLE, where the peer has told us it has no WiFi LAN.
+                    // When it does have one, the LAN offer is made directly and
+                    // none of this runs.
+                    supported_medium: vec![Medium::WifiHotspot.into()],
+                    is_request: Some(false),
+                }),
+                ..Default::default()
+            }),
+        };
+        self.encrypt_and_send(&frame).await?;
+        info!("Bandwidth upgrade: replied with supported mediums [WIFI_HOTSPOT]");
+        Ok(())
+    }
+
+    #[cfg(not(all(feature = "experimental", target_os = "windows")))]
+    async fn send_supported_mediums(&mut self) -> Result<(), anyhow::Error> {
         Ok(())
     }
 
@@ -533,7 +1250,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
         let v1_frame = offline
             .v1
             .as_ref()
-            .ok_or_else(|| anyhow!("Missing required fields"))?;
+            .ok_or_else(|| anyhow!("Missing required fields: decrypted OfflineFrame has no v1"))?;
         match v1_frame.r#type() {
             location_nearby_connections::v1_frame::FrameType::PayloadTransfer => {
                 trace!("Received FrameType::PayloadTransfer");
@@ -654,7 +1371,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
                         }
                     }
                     payload_header::PayloadType::File => {
-                        info!("Processing PayloadType::File");
+                        // Once per chunk (~35/s over BLE), so `trace`.
+                        trace!("Processing PayloadType::File");
                         let payload_id = header.id();
 
                         let file_internal = self
@@ -726,8 +1444,90 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
                 }
             }
             location_nearby_connections::v1_frame::FrameType::KeepAlive => {
+                // Answer every one. Rate-limiting these to 12s was tried on the
+                // theory that fewer outbound indications would clear the BLE
+                // link's confirmation backlog; it measurably made things *worse*
+                // (failure moved from ~1.3 MB to ~777 KB), because there was no
+                // backlog to clear - the indications were confirming one at a
+                // time with `0 still queued`. Don't retry this.
                 trace!("Sending keepalive");
+                self.last_keepalive_response = Some(std::time::Instant::now());
                 self.send_keepalive(true).await?;
+            }
+            location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation => {
+                info!(
+                    "Received BandwidthUpgradeNegotiation: {:?}",
+                    v1_frame.bandwidth_upgrade_negotiation
+                );
+                let is_path_request = v1_frame
+                    .bandwidth_upgrade_negotiation
+                    .as_ref()
+                    .map(|bun| {
+                        bun.event_type()
+                            == location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType::UpgradePathRequest
+                    })
+                    .unwrap_or(false);
+                // The client announces it has finished writing to the old
+                // channel and will not proceed until we say the old one may be
+                // closed. Switching at CLIENT_INTRODUCTION_ACK instead left this
+                // frame arriving at a bridge that had already torn down, and the
+                // phone cancelled the transfer.
+                let is_last_write = v1_frame
+                    .bandwidth_upgrade_negotiation
+                    .as_ref()
+                    .map(|bun| {
+                        bun.event_type()
+                            == location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType::LastWriteToPriorChannel
+                    })
+                    .unwrap_or(false);
+                if is_last_write {
+                    info!("Bandwidth upgrade: LAST_WRITE_TO_PRIOR_CHANNEL; releasing the old channel");
+                    if let Err(e) = self.send_safe_to_close_prior_channel().await {
+                        warn!("send_safe_to_close_prior_channel failed: {e}");
+                    }
+                    // Only now is it safe to move the stream across.
+                    #[cfg(all(feature = "experimental", target_os = "windows"))]
+                    if let Some(tx) = &self.switch_tx {
+                        let _ = tx.send(());
+                    }
+                }
+
+                if is_path_request {
+                    // WIFI_HOTSPOT, not WIFI_DIRECT. Windows can only host
+                    // WIFI_DIRECT_WITH_DEVICE_NAME, which needs Wi-Fi P2P device
+                    // discovery and never completed against this phone; a
+                    // soft-AP is a medium Windows genuinely serves. Set
+                    // RQS_TRY_WIFI_DIRECT_UPGRADE=1 to use the old path.
+                    if std::env::var("RQS_TRY_WIFI_DIRECT_UPGRADE").is_ok() {
+                        info!("Phone requested an upgrade path; offering WIFI_DIRECT");
+                        if let Err(e) = self.offer_wifi_direct_upgrade().await {
+                            warn!("offer_wifi_direct_upgrade (on request) failed: {}", e);
+                        }
+                    } else {
+                        info!("Phone requested an upgrade path; offering WIFI_HOTSPOT");
+                        if let Err(e) = self.offer_wifi_hotspot_upgrade().await {
+                            warn!("offer_wifi_hotspot_upgrade (on request) failed: {}", e);
+                        }
+                    }
+                }
+            }
+            location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeRetry => {
+                info!(
+                    "Received BandwidthUpgradeRetry: {:?}",
+                    v1_frame.bandwidth_upgrade_retry
+                );
+                // The phone announces its mediums with `is_request` unset and
+                // then waits for ours before asking for an upgrade path. Gating
+                // the reply on `is_request` meant we never answered, so it never
+                // asked - and the unsolicited UPGRADE_PATH_AVAILABLE we pushed
+                // at accept time was answering a question nobody had put.
+                //
+                // Verified reachable: the phone joins our AP, takes a DHCP lease
+                // and reaches 8899 when driven by hand. Only the negotiation is
+                // missing.
+                if let Err(e) = self.send_supported_mediums().await {
+                    warn!("send_supported_mediums failed: {}", e);
+                }
             }
             _ => {
                 error!("Unhandled offline frame encrypted: {:?}", offline);
@@ -744,7 +1544,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
         let v1_frame = frame
             .v1
             .as_ref()
-            .ok_or_else(|| anyhow!("Missing required fields"))?;
+            .ok_or_else(|| anyhow!("Missing required fields: transfer-setup frame has no v1"))?;
 
         if v1_frame.r#type() == sharing_nearby::v1_frame::FrameType::Cancel {
             info!("Transfer canceled");
@@ -802,7 +1602,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
         v1_frame: &sharing_nearby::V1Frame,
     ) -> Result<(), anyhow::Error> {
         if v1_frame.paired_key_encryption.is_none() {
-            return Err(anyhow!("Missing required fields"));
+            return Err(anyhow!(
+                "Missing required fields: expected PairedKeyEncryption, got {:?}",
+                v1_frame.r#type()
+            ));
         }
 
         let paired_result = sharing_nearby::Frame {
@@ -826,7 +1629,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
         v1_frame: &sharing_nearby::V1Frame,
     ) -> Result<(), anyhow::Error> {
         if v1_frame.paired_key_result.is_none() {
-            return Err(anyhow!("Missing required fields"));
+            return Err(anyhow!(
+                "Missing required fields: expected PairedKeyResult, got {:?}",
+                v1_frame.r#type()
+            ));
         }
 
         Ok(())
@@ -836,10 +1642,48 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
         &mut self,
         v1_frame: &sharing_nearby::V1Frame,
     ) -> Result<(), anyhow::Error> {
-        let introduction = v1_frame
-            .introduction
-            .as_ref()
-            .ok_or_else(|| anyhow!("Missing required fields"))?;
+        // A Response here means the peer thinks *it* is receiving.
+        //
+        // The sender drives PairedKeyEncryption -> PairedKeyResult ->
+        // Introduction; the receiver answers with Response. So a Response
+        // arriving where an Introduction belongs is a role mismatch, not a
+        // corrupt frame - the peer connected believing we were sending to it.
+        //
+        // Seen after a completed PC -> phone transfer, when the phone then
+        // connects over BLE still holding the earlier session's role. This
+        // handler can only receive, so there is nothing to salvage; say so
+        // plainly instead of failing with a confusing "missing field" and
+        // leaving the card hanging.
+        if v1_frame.r#type() == sharing_nearby::v1_frame::FrameType::Response {
+            warn!(
+                "Peer sent Response where an Introduction belongs: it believes it is the \
+                 receiver. Dropping the session so it can start a fresh one."
+            );
+            // Tell it to let go, so the stale role dies with this connection.
+            // Without this the peer keeps the role and every retry fails the
+            // same way until the *app* is restarted, which is what we saw.
+            if let Err(e) = self.disconnection().await {
+                debug!("Could not send disconnection to the confused peer: {e}");
+            }
+            self.update_state(
+                |e| {
+                    e.state = State::Disconnected;
+                },
+                true,
+            )
+            .await;
+            return Err(anyhow!(
+                "peer connected as a receiver, expecting us to send - it is still holding the \
+                 role from an earlier transfer. Nothing to receive here."
+            ));
+        }
+
+        let introduction = v1_frame.introduction.as_ref().ok_or_else(|| {
+            anyhow!(
+                "Missing required fields: expected Introduction, got {:?}",
+                v1_frame.r#type()
+            )
+        })?;
 
         // No need to inform the channel here, we'll do it anyway with files info
         self.update_state(
@@ -849,6 +1693,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
             false,
         )
         .await;
+
+        // Start the WiFi Direct group *now*, while the user is deciding, rather
+        // than at accept time. Bringing up the group owner takes a couple of
+        // seconds of WinRT work; starting it here gives it a head start so it's
+        // discoverable before the phone's first P2P formation attempt (which
+        // logcat showed racing ahead of discovery). The offer frame is still
+        // sent at accept time; ensure_wifi_direct_group() is idempotent.
+        #[cfg(all(feature = "experimental", target_os = "windows"))]
+        if std::env::var("RQS_TRY_WIFI_DIRECT_UPGRADE").is_ok() {
+            if let Err(e) = self.ensure_wifi_direct_group().await {
+                warn!("ensure_wifi_direct_group (early) failed: {e}");
+            }
+        }
 
         if !introduction.file_metadata.is_empty() && introduction.text_metadata.is_empty() {
             trace!("process_introduction: handling file_metadata");
@@ -1051,6 +1908,61 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
         };
 
         self.send_encrypted_frame(&frame).await?;
+
+        // Offer the bandwidth upgrade now that the user has accepted and file
+        // bytes are about to flow — grishka's PROTOCOL.md says this push is the
+        // design ("after the transfer is accepted, the server may ask the client
+        // for a bandwidth upgrade"). WIFI_DIRECT, not WIFI_HOTSPOT: the phone
+        // refuses the latter outright while it's on WiFi-LAN.
+        // Opt-in while this is being brought up.
+        // Push it unsolicited. Over BLE the phone never sends
+        // BandwidthUpgradeRetry *or* UPGRADE_PATH_REQUEST - measured: not one
+        // of either in a full WiFi-off transfer - while its own log says
+        // "timeout when waiting for high-quality medium" for 68s. Both sides
+        // were waiting for the other. Our handlers stay in place for the peers
+        // that do ask; this covers the ones that don't.
+        //
+        // The WIFI_HOTSPOT-is-refused-on-WiFi-LAN objection doesn't apply here:
+        // with the phone's WiFi off its ConnectionRequest omits WIFI_LAN, so
+        // there is no WiFi-LAN connection for a hotspot to destroy.
+        // Only upgrade a transport that can actually be upgraded.
+        //
+        // `upgrade_tx` is set by the BLE bridge alone - it is the only transport
+        // that can swap the stream onto a new socket, and the only one slow
+        // enough to want to. Offering on a connection that is already TCP is
+        // both pointless and destructive: the peer took the offer, connected to
+        // our upgrade port, introduced itself, sent LAST_WRITE and moved to the
+        // new socket, while this request carried on reading the old one - the
+        // stream desynced and the next frame died with "SecureMessage.
+        // header_and_body: invalid wire type".
+        #[cfg(all(feature = "experimental", target_os = "windows"))]
+        let can_upgrade = self.upgrade_tx.is_some();
+        #[cfg(not(all(feature = "experimental", target_os = "windows")))]
+        let can_upgrade = false;
+
+        if !can_upgrade {
+            debug!("Bandwidth upgrade: transport cannot adopt an upgraded socket, not offering");
+        } else if std::env::var("RQS_TRY_WIFI_DIRECT_UPGRADE").is_ok() {
+            if let Err(e) = self.offer_wifi_direct_upgrade().await {
+                warn!("offer_wifi_direct_upgrade failed: {}", e);
+            }
+        } else if self.peer_has_wifi_lan {
+            // The peer has a network, so offer to meet it there rather than
+            // asking it to join ours. A hotspot would mean leaving its own
+            // network, which google/nearby refuses ("this will destroy
+            // WIFI_LAN") - measured: such a phone completed the whole upgrade
+            // handshake and then sent nothing, hanging the transfer.
+            //
+            // Skipping the upgrade entirely was the first fix and was too blunt:
+            // a phone that has WiFi can still reach us over BLE (we advertise as
+            // a receiver on both, and it picks), and leaving that on BLE means
+            // 20 KB/s and the ~1 MB indication-timeout wall.
+            if let Err(e) = self.offer_wifi_lan_upgrade().await {
+                warn!("offer_wifi_lan_upgrade failed: {}", e);
+            }
+        } else if let Err(e) = self.offer_wifi_hotspot_upgrade().await {
+            warn!("offer_wifi_hotspot_upgrade failed: {}", e);
+        }
 
         self.update_state(
             |e| {
@@ -1279,6 +2191,31 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
         Ok(())
     }
 
+    /// Tell the client the prior (BLE) channel may be closed. Sent on the *old*
+    /// channel, which is the last thing that goes over it.
+    async fn send_safe_to_close_prior_channel(&mut self) -> Result<(), anyhow::Error> {
+        use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType;
+        use crate::location_nearby_connections::BandwidthUpgradeNegotiationFrame;
+
+        let frame = OfflineFrame {
+            version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
+            v1: Some(location_nearby_connections::V1Frame {
+                r#type: Some(
+                    location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation
+                        .into(),
+                ),
+                bandwidth_upgrade_negotiation: Some(BandwidthUpgradeNegotiationFrame {
+                    event_type: Some(EventType::SafeToClosePriorChannel.into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        };
+        self.encrypt_and_send(&frame).await?;
+        info!("Bandwidth upgrade: sent SAFE_TO_CLOSE_PRIOR_CHANNEL");
+        Ok(())
+    }
+
     async fn send_keepalive(&mut self, ack: bool) -> Result<(), anyhow::Error> {
         let ack_frame = location_nearby_connections::OfflineFrame {
             version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
@@ -1365,4 +2302,84 @@ impl<S: AsyncRead + AsyncWrite + Unpin> InboundRequest<S> {
         // get spammed by new requests. Currently set to 10 micro secs.
         tokio::time::sleep(SANITY_DURATION).await;
     }
+}
+
+/// Read the phone's CLIENT_INTRODUCTION off the freshly-joined WiFi Direct
+/// socket and answer it with CLIENT_INTRODUCTION_ACK.
+///
+/// These two frames are **plaintext** `OfflineFrame`s with the usual 4-byte
+/// big-endian length prefix. google/nearby reads the introduction before
+/// `ReplaceChannelForEndpoint(..., enable_encryption)` hands the UKEY2 context
+/// to the new channel, so nothing on this socket is encrypted until the swap -
+/// which is why this runs on its own without touching the handshake keys or the
+/// sequence counters.
+///
+/// Free-standing rather than a method on `InboundRequest<S>`: an async fn in
+/// that impl produces a future parameterised by `S` even when it never touches
+/// it, so `tokio::spawn` would demand `S: Send + 'static` from an impl that
+/// doesn't promise it.
+///
+/// Stops at the ACK for now. The swap itself (LAST_WRITE_TO_PRIOR_CHANNEL ->
+/// SAFE_TO_CLOSE_PRIOR_CHANNEL, then moving the encrypted stream across) is
+/// still to build, so the phone will introduce itself, get its ACK, and then
+/// wait for a move that never comes. The transfer continues on WiFi-LAN.
+#[cfg(all(feature = "experimental", target_os = "windows"))]
+pub(crate) async fn introduce_upgraded_channel(
+    mut socket: tokio::net::TcpStream,
+) -> Result<tokio::net::TcpStream, anyhow::Error> {
+    use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::{
+        ClientIntroductionAck, EventType,
+    };
+    use crate::location_nearby_connections::BandwidthUpgradeNegotiationFrame;
+
+    let mut length_buf = [0u8; 4];
+    stream_read_exact(&mut socket, &mut length_buf).await?;
+    let length = i32::from_be_bytes(length_buf);
+    if length <= 0 || length > SANE_FRAME_LENGTH {
+        return Err(anyhow!("insane introduction frame length: {length}"));
+    }
+
+    let mut frame_buf = vec![0u8; length as usize];
+    stream_read_exact(&mut socket, &mut frame_buf).await?;
+    let frame = OfflineFrame::decode(frame_buf.as_slice())?;
+    info!("Bandwidth upgrade: introduction frame: {:?}", frame);
+
+    let endpoint_id = frame
+        .v1
+        .as_ref()
+        .and_then(|v1| v1.bandwidth_upgrade_negotiation.as_ref())
+        .filter(|bun| bun.event_type() == EventType::ClientIntroduction)
+        .and_then(|bun| bun.client_introduction.as_ref())
+        .map(|intro| intro.endpoint_id.clone())
+        .ok_or_else(|| anyhow!("first frame on the upgraded socket was not CLIENT_INTRODUCTION"))?;
+
+    info!("*** Bandwidth upgrade: CLIENT_INTRODUCTION from endpoint_id={endpoint_id:?} ***");
+
+    let ack = OfflineFrame {
+        version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
+        v1: Some(location_nearby_connections::V1Frame {
+            r#type: Some(
+                location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation.into(),
+            ),
+            bandwidth_upgrade_negotiation: Some(BandwidthUpgradeNegotiationFrame {
+                event_type: Some(EventType::ClientIntroductionAck.into()),
+                client_introduction_ack: Some(ClientIntroductionAck {}),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+    };
+    let data = ack.encode_to_vec();
+    socket.write_all(&(data.len() as u32).to_be_bytes()).await?;
+    socket.write_all(&data).await?;
+    socket.flush().await?;
+    info!("Bandwidth upgrade: sent CLIENT_INTRODUCTION_ACK");
+
+    // Hand the socket back to the caller, which splices it into the existing
+    // encrypted stream. It was previously drained and logged here, which is how
+    // we learned the phone starts sending payload bytes the moment it is
+    // acknowledged - it does not wait for LAST_WRITE_TO_PRIOR_CHANNEL on the old
+    // channel. So there is nothing to do between the ACK and the swap, and
+    // anything read here would be payload we then had to replay.
+    Ok(socket)
 }

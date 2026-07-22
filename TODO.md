@@ -3,6 +3,31 @@
 Tracks work on this fork: transport mediums, completed features, and parked
 items. Check items off (`[x]`) as they land; for parked items, note why.
 
+## Known issues
+
+- [ ] **First-connection BLE handshake flakiness** — the one open defect after
+      the 2026-07-22 bandwidth-upgrade work. Two forms, both self-recovering on
+      a retry:
+        - The first BLE connection after launch fails the UKEY2 handshake; a
+          re-send works.
+        - The first inbound (phone -> PC) after an outbound send ends in state
+          `Initial` without a ConnectionRequest - the peer opens the BLE socket
+          and closes it without speaking.
+      Pre-existing, not introduced by the upgrade work, so it is documented
+      rather than blocking the merge. Slated for its own branch.
+
+      An auto-retry was tried and reverted: it reconnected without disconnecting
+      first, hit an already-open Weave connection, timed out over 10s, rescanned
+      for a phone that was no longer advertising, and cascaded into a shutdown
+      hang. A retry must disconnect the peripheral between attempts and must not
+      block shutdown.
+
+      What is available now that was not when this was last attacked: the
+      per-frame `send_frame` trace, the `mux out` trace with Weave counters, and
+      the receive-side byte dump. The missing capture is a logcat of a *failing
+      first connection* alongside those traces - every capture so far has been of
+      the retry that succeeded.
+
 ## Transport mediums
 
 rquickshare currently supports only **WiFi LAN**. Quick Share (Nearby
@@ -10,11 +35,12 @@ Connections) negotiates among several mediums and "bandwidth-upgrades" to the
 best available one. Goal: support them all.
 
 > **Shared prerequisite:** every non-LAN medium rides on the Nearby Connections
-> **bandwidth-upgrade negotiation** (`BandwidthUpgradeNegotiationFrame`), which
-> is not implemented here and, per grishka's reverse-engineering, not publicly
-> documented — quote: *"It is still not clear how the actual medium switch
-> occurs."* Cracking this is the real first milestone; after it, each medium is
-> mostly "plug in the platform transport."
+> **bandwidth-upgrade negotiation** (`BandwidthUpgradeNegotiationFrame`), not yet
+> implemented here. Good news from the research pass: it's **fully defined** in
+> our proto and in google/nearby's open source (see `docs/wifi-direct.md`), so it's
+> replicable — despite grishka's note that "it is still not clear how the actual
+> medium switch occurs." Implementing it is the first milestone; after it, each
+> medium is mostly "plug in the platform transport."
 
 - [x] **WiFi LAN** — mDNS discovery + TCP over a shared network. Both devices
       must be on the same network. **Now dual-stack (IPv4 + IPv6):** discovery
@@ -27,22 +53,481 @@ best available one. Goal: support them all.
       (`socket2`, `IPV6_V6ONLY` off) with an IPv4-only fallback, and IPv4-mapped
       peer addresses are normalized back to plain IPv4 so ids/logs don't depend
       on how the socket bound.
-      **Parked — advertising our own IPv6** (`mdns.rs` stays on `AddrType::V4`
-      rather than `AddrType::BOTH`): testing showed the Pixel 10 advertises IPv6
-      (global + link-local) but *none of it was reachable* from the PC. So
+      **Parked for good — advertising our own IPv6** (`mdns.rs` stays on
+      `AddrType::V4` rather than `AddrType::BOTH`): the Pixel 10 advertises IPv6
+      (global + link-local) but *none of it is reachable* from the PC. So
       advertising ours would likely hand the phone addresses it can't reach
       either, and its fallback behaviour isn't ours to control — risking working
-      IPv4 transfers for no measurable gain. Cause unconfirmed; most likely the
-      network not routing IPv6 between clients, or the phone's Quick Share
-      listener being IPv4-only (its WiFi firmware bug is a less likely third).
-      **Retest on the Pixel 10 Pro:** if its advertised IPv6 is reachable from
-      the PC, the cause was phone-side and the advertisement can be flipped; if
-      it's still unreachable, it's the network and this stays parked for good.
-- [ ] **WiFi Direct** — peer-to-peer WiFi link, no shared network needed.
-      Windows: WinRT `Windows.Devices.WiFiDirect`. Linux: wpa_supplicant P2P
-      (hard). Blocked on the bandwidth-upgrade negotiation. **Next target.**
-- [ ] **Hotspot** — one device runs a soft-AP, the other joins. Similar shape
-      to WiFi Direct; platform soft-AP APIs vary.
+      IPv4 transfers for no measurable gain.
+      **Retested on the Pixel 10 Pro / Android 16 (2026-07-16): still
+      unreachable**, identical symptom (`[2605:...]:53601 unreachable, trying
+      next candidate`). Two different phones on two Android versions failing the
+      same way rules out the phone: it's the network not routing IPv6 between
+      clients, or Android not accepting inbound IPv6. New hardware will not
+      change this — only a different network would, so stop retesting it.
+- [ ] **WiFi Direct** — peer-to-peer WiFi link. Protocol spec in
+      `docs/wifi-direct.md`.
+
+      **NOT IMPLEMENTED, deliberately (2026-07-22). Do not start on this
+      without reading why.**
+
+      Hosting works: `wifi_direct_win.rs` brings up an autonomous group owner
+      (the `IsAutonomousGroupOwnerEnabled` fix below). What does not work is the
+      *peer joining* our group, and the failure is not graceful — it leaves the
+      phone's P2P state wedged at `[2]BUSY` until the Nearby stack restarts,
+      which then breaks unrelated transfers (see the testing gotcha below). A
+      medium whose failure mode degrades the peer's radio is worse than no
+      medium.
+
+      It also has nothing left to do. WIFI_HOTSPOT covers every case, measured
+      end to end — see the Hotspot entry's status table. WiFi Direct and
+      WIFI_HOTSPOT are both ordinary 802.11 links with identical PHY rates;
+      there is no speed to be gained. The difference is only in how the peer
+      associates: a hotspot is a plain SSID/password soft-AP joined with
+      standard station APIs, while WiFi Direct needs P2P discovery and
+      group-owner negotiation through `WifiP2pManager`.
+
+      The code stays in the tree, env-gated and *not advertised* — the receive
+      path claims only WIFI_HOTSPOT in its supported-medium set, because
+      claiming a medium we will not offer invites the peer to negotiate one we
+      then never provide.
+
+      **Revisit it only if one of these becomes true:**
+        - A peer refuses WIFI_HOTSPOT but accepts WIFI_DIRECT. Nothing observed
+          so far does; the Pixel lists both and picks whichever we offer.
+        - The PC is WiFi-only rather than on Ethernet. Windows Mobile Hotspot
+          takes the WiFi adapter, so hosting one costs a WiFi-only machine its
+          own network connection. A P2P group can in principle run alongside an
+          existing station connection, which is the one genuine architectural
+          advantage WiFi Direct has here.
+        - The `[2]BUSY` join failure is understood and fixed. Until then every
+          offer is a liability, not a fallback.
+
+      **TESTING GOTCHA — read first, it will waste your afternoon otherwise.**
+      A failed WiFi Direct upgrade **wedges the phone's Nearby stack**. After it,
+      opening Quick Share on the phone to send drops the phone's WiFi, and it
+      keeps doing so on every subsequent attempt — *with no group of ours up and
+      the app doing nothing but mDNS + BLE*, so it reads exactly like our
+      advertising is at fault. It isn't.
+      **Reset: disable the Quick Share extension on the phone, then re-enable it.**
+      WiFi then stops dropping. Do this between attempts.
+      Mechanism is visible in logcat — the phone cannot tear down its own P2P
+      group after our join fails:
+      ```
+      NearbyMediums: Failed to remove WiFi Direct group — [2]BUSY
+      NearbyMediums: Failed to cancel Wifi Direct group: [2]BUSY.
+      ```
+      `[2]` is `WifiP2pManager.BUSY`. The stale P2P state survives until the
+      Nearby stack restarts. This is also why the offer must stay gated behind
+      `RQS_TRY_WIFI_DIRECT_UPGRADE` and must not ship on by default: while the
+      join is broken, every offer risks wedging the peer's radio.
+      (Do not re-diagnose this as "our app drops the phone's WiFi" — that was an
+      earlier, separate bug, caused by the hotspot leaking via `mem::forget` and
+      surviving the process. That code is deleted and that bug is fixed.)
+
+      **PLATFORM PROVEN 2026-07-17 — the old "BE200 can't do it" note was wrong.**
+      The blocker was a single unset property: `IsAutonomousGroupOwnerEnabled`.
+      Without it the publisher only advertises *presence* and waits for a peer to
+      negotiate group ownership, so no group is created — no AP, no virtual
+      adapter. `Start()` then reports `Started` truthfully about the
+      *advertisement*, which we misread as the adapter refusing the role.
+      With `advertisement.SetIsAutonomousGroupOwnerEnabled(true)` (see
+      `core_lib/src/bin/wifi_direct_poc.rs`), verified end to end against a Pixel
+      10 Pro:
+      - publisher reports `status=Started, error=Success` (the `StatusChanged`
+        event carries a `WiFiDirectError` — the only place Windows explains a
+        failure; polling `Status()` alone hides it)
+      - a real legacy SSID broadcasts (`DIRECT-DLAARONPCUPYQ` / `KYoNRZKV`)
+      - the phone associates and gets a DHCP lease (`192.168.137.37`)
+      - it reaches a TCP socket on the group owner: `192.168.137.1:8899`
+      The GO lands on the **same 192.168.137.1 ICS gateway as the Mobile
+      Hotspot**, so `hotspot_gateway_ip()` in `hotspot_win.rs` works unchanged for
+      WiFi Direct credentials.
+      **Caveats worth keeping:** the adapter appears as a *plain* `Wi-Fi N` entry
+      (here `Wi-Fi 5`) with no "Direct" in its name or description — don't hunt
+      for it by name. And this PC is on **Ethernet**, leaving the WiFi radio free
+      to be an AP; a laptop using WiFi for internet must do both jobs on one radio
+      and may not behave the same. Untested.
+
+      Why it's reachable when Hotspot isn't — `bwu_manager.cc` guards them
+      asymmetrically:
+      ```cpp
+      if (channel_manager_->isWifiLanConnected() &&
+          ((upgrade_medium == Medium::WIFI_HOTSPOT) ||
+           ((upgrade_medium == Medium::WIFI_DIRECT) &&
+            (client->GetLocalOsInfo().type() == OsInfo::WINDOWS))))
+      ```
+      `client` is the *phone's* ClientProxy, so `GetLocalOsInfo()` is ANDROID and
+      the WIFI_DIRECT arm is false. WIFI_HOTSPOT has no such escape.
+
+      **Live-negotiation progress 2026-07-16.** The offer now gets *past* the
+      guard that killed Hotspot — the phone accepts WIFI_DIRECT as a medium and
+      fails on the contents instead. Two bugs found so far, both in what we send:
+
+      1. **NUL-padded passphrase (fixed).** `PasswordCredential.Password()` hands
+         back a NUL-padded HSTRING and `to_string()` keeps it, so we advertised
+         `password: "PuLLMSIN\0"`. WPA2 requires 8–63 *printable* ASCII, so the
+         phone rejected the offer at validation — `UPGRADE_FAILURE` **1 second**
+         after the offer, radio never touched, our own `\0` echoed back at us.
+         Invisible in the POC, which only ever `println!`'d the value.
+         `trim_nuls()` in `wifi_direct_win.rs` fixes it; the password now arrives
+         clean (`CYk9QDSW`) and the failure moved to **12 seconds** — the phone
+         now genuinely tries to join and times out.
+      ## STATE OF PLAY 2026-07-16 (end of session) — READ THIS FIRST
+
+      **The single biggest lesson: every answer came from `adb logcat` on the
+      phone. Nothing from the Windows side ever diagnosed anything.** Seven
+      theories were reasoned out from our end and all seven were wrong. Start
+      with logcat. Procedure and the reset gotcha are documented above.
+
+      ### PROVEN (do not re-litigate)
+
+      1. **`LegacySettings` suppresses the P2P Group Owner bit.** Measured in the
+         peer's own discovery, same phone, same code, one property toggled:
+         ```
+         legacy ON : P2P-DEVICE-FOUND ... name='AARONPC' group_capab=0x88
+         legacy OFF: P2P-DEVICE-FOUND ... name='AARONPC' group_capab=0x8b   ← bit0 = GO
+         ```
+         With legacy on we ran an autonomous GO advertising "I am not a group
+         owner", so the phone attempted GO *negotiation* rather than a join, and
+         an autonomous GO won't negotiate → sub-second
+         `P2P-GROUP-FORMATION-FAILURE`. The BSSID corroborates: legacy off splits
+         it from the device address (`72:08:10:a2:6a:b6` vs `p2p_dev_addr
+         70:08:10:a2:6a:b7`) — what a real GO looks like on air.
+         **Legacy is now OFF by default.** `RQS_WIFI_DIRECT_LEGACY=1` restores it.
+      2. **`legacy.Ssid()` / `Passphrase()` still work with legacy disabled.** So
+         we get the GO bit *and* the ssid the phone demands. No trade-off.
+      3. **The phone discovers us by name.** `P2P-DEVICE-FOUND name='AARONPC'`,
+         `config_methods=0x11e8` (PushButton present), `dev_capab=0x25`
+         (Invitation supported). Device-name discovery works.
+      4. **The GO follows the host's station channel.** Host associated on ch48 →
+         analyser measured the group on **ch48**. Host on Ethernet → group picked
+         **ch157**. So when a STA link exists we can compute the frequency from
+         `log_wlan_interfaces()`, which *can* read the station's channel.
+      5. **Frequency is not the blocker.** Sent the correct 5240 with the group
+         verified on ch48: unchanged failure. Also dead: the band theory (both
+         ends 5GHz) and the channel-concurrency theory.
+      6. **The phone's GMS is older than google/nearby `main`.** Current upstream
+         *refuses* ssid/password ("SSID/PASSWORD auth type is not supported,
+         return") and requires `device_name`. GMS 26.26.34 does the reverse:
+         `OfflineFrame BANDWIDTH_UPGRADE_NEGOTIATION(UPGRADE_PATH_AVAILABLE|
+         WIFI_DIRECT) missing ssid or not in correct format`. The proto says why:
+         device-name on Android is "in the future".
+         **So send every field**, as google does
+         (`ForBwuWifiDirectPathAvailable(ssid, password, port, freq, ...,
+         gateway, device_name, pin)`) — ssid/password for today's phone,
+         device_name for tomorrow's. Stripping them produced silence.
+      7. `supported_wifi_direct_auth_types=[]` — the phone advertises none, so it
+         isn't doing auth-type negotiation at all.
+      8. **`assoc key_mgmt 0x0` is a red herring.** It means no association
+         happened, not a mismatch. Compare the phone's own working STA link:
+         `assoc key_mgmt 0x400 network key_mgmt 0xc000d42` → associated. Group
+         security is WPA2-PSK/WPS (analyser), so WPA3 is not involved.
+
+      ### WHERE IT STOPS
+
+      With legacy off, GO bit set, correct ssid/password/frequency/device_name,
+      and `Intensive` discoverability: still `UpgradeFailure` at ~17s.
+      `ConnectionRequested` has **never** fired. The revealing ordering:
+      ```
+      16:44:34.303  P2P-GROUP-FORMATION-FAILURE
+      16:44:47.355  P2P-GROUP-FORMATION-FAILURE
+      16:44:48.813  P2P-DEVICE-FOUND ... group_capab=0x8b   ← finds us only after
+      ```
+      The phone attempts formation *before* discovery lands, fails, then finds
+      us, retries, fails. `Intensive` did not close that gap.
+
+      ### UPDATE 2026-07-19 — early-start done, mechanism now understood
+
+      Group startup was split from the offer (`ensure_wifi_direct_group`, called
+      at `WaitingForUserConsent`; idempotent). Group now comes up ~1s before the
+      offer instead of at accept. Tested every combination:
+      legacy on/off × freq=5240 × early-start × full creds. **All fail identically.**
+
+      logcat pinned the mechanism. The phone does a **FAST P2P client join**
+      (`WifiP2pMetrics: startConnectionType:FAST, startGroupRole:CLIENT`,
+      `network key_mgmt 0x2` = WPA2-PSK). It **never associates**:
+      - `assoc key_mgmt 0x0` every attempt = supplicant selected no BSS.
+      - No `Trying to associate` / `Associated with` ever logged.
+      - `Nearby: Timed out waiting to connect to DIRECT-xxAARONPCxxxx` ×3, then
+        `WifiDirectBandwidthUpgradeMedium failed to connect to the WiFi Direct ssid`.
+      - **`ConnectionRequested` has never fired on our WinRT side** — the phone's
+        P2P formation frames aren't reaching our GO at all.
+
+      The phone finds us via P2P discovery (`P2P-DEVICE-FOUND name='AARONPC'`) as
+      **two entries**: the device addr `70:..:b7` with `group_capab=0x88` (no GO
+      bit) and the group BSSID `72:..:b6` with `group_capab=0x8b` (GO bit). But
+      discovery ≠ association: it never moves to the operating channel and joins.
+
+      **Leading hypothesis (a real wall, not a bug):** this phone's GMS (26.26.34)
+      only does the FAST PSK path, which needs a joinable P2P group whose
+      operating passphrase matches what we send. WinRT's autonomous GO exposes
+      only the *legacy* passphrase (`LegacySettings.Passphrase`), which is a
+      separate credential from the P2P group's, and it hosts joins via the
+      device-name/WPS path — the path this phone does **not** yet support ("in
+      the future" per the proto). Newer phones use device_name and would work;
+      this one can't take what WinRT can give.
+
+      ### RESOLVED 2026-07-19 — Google's own client does NOT upgrade here either
+
+      Ran official **Google Quick Share for Windows**, same Pixel, same network.
+      logcat, decisive line:
+      ```
+      NS_PAYLOAD BandWidthChanged(quality=3, connectionMedium=5,
+        localStaFrequency=5240, remoteStaFrequency=5240, instantConnectionResult=2)
+      ```
+      `connectionMedium=5` = WIFI_LAN, `quality=3` = HIGH. **Zero P2P activity in
+      the whole capture** — no p2p-wlan0, no P2P-GROUP, no formation attempt.
+      Google connected over WIFI_LAN and stayed there by design.
+
+      **Why: both devices are on the same WiFi (`localStaFrequency ==
+      remoteStaFrequency == 5240`).** When the two devices share a fast LAN,
+      Nearby does not upgrade to WiFi Direct — WIFI_LAN is already the
+      high-bandwidth path. WiFi Direct is for when there is NO shared network.
+
+      **So the entire WiFi Direct effort was tested in the one scenario where it
+      is neither needed nor attempted, by us or by Google.** Our transfers were
+      already running over WIFI_LAN the whole time. Not a bug in our GO code.
+
+      Consequences:
+      1. To actually exercise WiFi Direct (ours or Google's), the phone and PC
+         must be on **different** networks: phone on cellular with WiFi off, PC on
+         Ethernet, no common LAN. Only then is WIFI_LAN unavailable and WIFI_DIRECT
+         attempted. **Never tested — every run had both on homenet-u.**
+      2. Mirror Google: do not offer the WiFi Direct upgrade when both devices
+         share a fast LAN. Keeping it behind `RQS_TRY_WIFI_DIRECT_UPGRADE` was
+         right; a shipping build should gate on "no shared WIFI_LAN", not always.
+
+      The GO-bit / device-name / early-start work stands and is correct for the
+      off-LAN case; it just was never the thing blocking on-LAN transfers.
+
+      **CONFIRMED 2026-07-19: with the phone off-WiFi (cellular only), our PC does
+      not appear as a Quick Share target at all.** We advertise the receiver only
+      over mDNS (WIFI_LAN); the BLE advertiser makes us *visible* but we have no
+      BLE/Bluetooth *receiver* + initial connection channel (that's #425, which
+      needs a GATT server, not implemented). So off-LAN there is no bootstrap
+      channel over which a WiFi Direct upgrade could ever be negotiated.
+
+      ### BOTTOM LINE — WiFi Direct has no reachable+useful scenario today
+
+      - **Both devices share a LAN** (the normal case): Nearby uses WIFI_LAN and
+        does not upgrade — proven with Google's own client. WiFi Direct is neither
+        needed nor attempted. Transfers already work.
+      - **No shared LAN**: WiFi Direct would matter, but the phone can't even
+        discover us without a BLE/Bluetooth bootstrap we don't have.
+
+      **The prerequisite for off-LAN transfers (and thus for WiFi Direct to ever
+      run) is the #425 BLE receiver + initial Bluetooth channel, NOT more WiFi
+      Direct debugging.** The WiFi Direct GO code is correct groundwork; it stays
+      behind `RQS_TRY_WIFI_DIRECT_UPGRADE` until #425 provides a path that reaches
+      it. Roadmap reordered accordingly: #425 first.
+
+      ### (superseded) earlier "decisive next test" note
+
+      Install **official Google Quick Share for Windows**, send from the same
+      Pixel, and watch whether it achieves a WiFi Direct upgrade or also stays on
+      WiFi-LAN. This settles whether the goal is even reachable with this phone:
+      - Google's app also stays on WiFi-LAN → **true platform wall**, this phone
+        + a WinRT GO can't do WiFi Direct, and it is not our bug. Stop here.
+      - Google's app upgrades → capture ITS logcat (`P2P-*`, `assoc key_mgmt`) and
+        diff against ours; something specific is still wrong on our side.
+
+      ### NEXT LEADS (untried)
+
+      - **Start the group earlier.** We create it at accept time, ~1s before the
+        offer. google's `HandleInitializeUpgradedMediumForEndpoint` starts the GO
+        and `StartAcceptingConnections` *before* building the frame, and their
+        `ListenForService` deliberately waits for the IP. If the group needs to
+        be discoverable for several seconds before the peer attempts formation,
+        we are structurally too late. Try starting it at
+        `WaitingForUserConsent`, or keeping one alive for the session.
+      - **`GetConnectionEndpointPairs()` for the real IPs.** We still hardcode the
+        ICS gateway. Only reachable once `ConnectionRequested` fires.
+      - `os_info` now reports WINDOWS (was hardcoded LINUX). Verified safe:
+        `bwu_manager.cc`'s WIFI_DIRECT guard reads `GetLocalOsInfo()` = the
+        *phone's own* OS (`client_proxy.h` keeps `local_os_info_` separate from
+        `GetRemoteOsInfo`). Did not change the outcome.
+
+      **ANSWERED BY LOGCAT 2026-07-16 — read this before theorising again.**
+      Five theories died reasoning from the Windows end (firmware, negotiation
+      ordering, "nothing to upgrade to", frequency, band). `adb logcat` on the
+      Pixel answered it in one capture. The phone's own account:
+      ```
+      WifiP2pMetrics: Start connection event, startConnectionType:FAST,
+                      startGroupRole:CLIENT, startAttributionTag:nearby_connections
+      WifiP2pService: Set P2P operating channel to 0, unsafe channels:
+      WifiP2pMetrics: End connection event, endConnectivityLevelFailureCode:GROUP_REMOVED
+      NearbyMediums:  MEDIUM_ERROR [NETWORK][WIFI_DIRECT][CONNECT][CONNECT_TO_NETWORK_FAILED][TIMEOUT]
+      NearbyMediums:  Failed to remove WiFi Direct group — [2]BUSY
+      NearbyConnections: WifiDirectBandwidthUpgradeMedium failed to connect to the
+                         WiFi Direct ssid DIRECT-ICAARONPCOO6J for endpoint 7X1u
+      ```
+      What this settles:
+      - **`Set P2P operating channel to 0`** = no channel constraint. The phone
+        never uses our `frequency` to pick a channel. **The frequency field and
+        the band/channel-concurrency theories are both dead.** `-1` was always
+        fine. Don't reopen either.
+      - **The phone joins as a P2P client** (`WifiP2pManager`,
+        `startGroupRole:CLIENT`, `connectionType:FAST` = join by network name +
+        passphrase, no discovery), on the p2p0 interface. **It does not do a
+        legacy AP join.**
+      - **The POC never tested the real path.** Joining `DIRECT-xxx` by hand from
+        the phone's WiFi list is a *legacy* association. That worked, and it is
+        why "PLATFORM PROVEN" below is only half true: the AP works; the P2P door
+        was never knocked on.
+      - `GROUP_REMOVED` after ~4.6s, retried once, same. `[2]BUSY` on cleanup is
+        a consequence (no group ever formed), not a cause.
+
+      **Live hypothesis (untested): nothing was answering the P2P door.** We set
+      `IsAutonomousGroupOwnerEnabled` + `LegacySettings`, but never created a
+      `WiFiDirectConnectionListener` / handled `ConnectionRequested` — the WinRT
+      callback through which a Windows GO accepts an incoming *P2P* client. Added
+      2026-07-16; resolving the peer via `WiFiDirectDevice::FromIdAsync(id)` is
+      what completes the association (there is no explicit accept), and the
+      returned device *is* the connection so it must be kept alive. Watch for
+      `*** WiFi Direct: ConnectionRequested from ... ***` — if that never appears,
+      the phone's association isn't reaching us at all and the problem is below
+      WinRT.
+
+      **STATUS: three field-level bugs found and fixed at the
+      credential/negotiation layer. All three were real. NONE fixed the join.**
+      The failure is a rock-steady **12 seconds** across every one of them, and
+      no `phone connected from 192.168.137.x` line has ever appeared. That
+      stability is the finding: a phone that rejects an offer at *negotiation*
+      fails in ~1s (measured, with the NUL bug below). 12s is a radio-level
+      association timeout — the phone accepts the offer, tries to join, and never
+      associates. **Stop proposing fixes at the frame layer; nothing we say in
+      those bytes will change this.**
+
+      The one unread piece of evidence: `medium_metadata` says the phone is on
+      `ap_frequency=5240` (5GHz, committed to its AP) and lists
+      `wifi_direct_cli_usable_channels` spanning both bands. The deleted hotspot
+      code reported `frequency=2437`, so Windows' soft-AP plausibly lands on
+      2.4GHz. A single-radio phone would have to abandon its 5GHz AP to follow us
+      to 2.4 — which looks exactly like a 12s timeout, and matches the observed
+      "app running + quickshare enabled → phone's wifi drops". `start()` now
+      reads the real channel via the Win32 WLAN API and logs every WLAN interface
+      (`log_wlan_interfaces`); WinRT exposes no channel. **Awaiting that number.**
+      If 2.4GHz: confirm with zero code by moving the phone to the router's
+      2.4GHz band and retrying. If 5GHz: the band theory is dead.
+
+      2. **`frequency` absent (fixed; did NOT cure the join).** The two credential
+         messages are *not* symmetric, and this is easy to miss:
+         ```proto
+         message WifiHotspotCredentials { optional int32 frequency = 5 [default = -1]; }
+         message WifiDirectCredentials  { optional int32 frequency = 4; }
+         ```
+         Only the Hotspot one declares a default. Leaving the WiFi Direct field
+         unset does **not** mean "unknown" on the wire — proto2 reads it back as
+         an implicit **0**, a frequency on no band. google's own
+         `WifiDirectCredentials` class (`internal/platform/wifi_credential.h`)
+         holds `int frequency_ = -1` and always writes the field, so a real peer
+         never sends 0 and Android has no reason to treat it as unset. We now
+         send `-1` ("unknown, scan for the SSID") explicitly.
+         **Note:** `frequency: -1` was tried against *Hotspot* and changed
+         nothing (see that entry) — but that proved only that Hotspot is
+         unreachable at the guard, never that the field is inert. Don't let that
+         result talk you out of this one.
+         **Outcome: sending -1 explicitly changed nothing — still 12s.** Correct
+         to send, but not the cure. We now send the *measured* frequency instead.
+      3. **Advertised mediums were disjoint from the offer (fixed; did NOT cure
+         the join).** `send_supported_mediums` replied `[WIFI_HOTSPOT, WIFI_LAN]`
+         — advertising the medium whose code we *deleted*, and omitting the one
+         we actually offer — then sent `UPGRADE_PATH_AVAILABLE(WIFI_DIRECT)` for
+         something we'd never claimed. The phone announces
+         `[WifiLan, WifiDirect, WifiAware, WifiHotspot, BleL2cap, Bluetooth, Ble, Nfc]`.
+         Now `[WIFI_DIRECT, WIFI_LAN]`. Still 12s.
+
+      **Diagnostic added:** the phone's `ConnectionRequest.medium_metadata`
+      carries `ap_frequency` and `wifi_direct_cli_usable_channels` — the channels
+      it can actually use as a WiFi Direct *client*, straight from the phone. We
+      had never logged it. If `-1` doesn't fix the join, read that list before
+      theorising: every wrong guess so far came from reasoning about our own
+      radio instead of asking the peer.
+
+      **Read the log with the file tools, not a shell** — a stale sandbox mount
+      served a cached copy and cost a full debugging round on yesterday's run.
+
+      **Next:** the swap (Increment B). `introduce_upgraded_channel()` now reads
+      CLIENT_INTRODUCTION and answers CLIENT_INTRODUCTION_ACK (both plaintext,
+      4-byte BE length prefix — google reads the introduction *before*
+      `ReplaceChannelForEndpoint(..., enable_encryption)`, so nothing on the new
+      socket is encrypted until the swap). Still to build:
+      LAST_WRITE_TO_PRIOR_CHANNEL → await the phone's LAST_WRITE →
+      SAFE_TO_CLOSE_PRIOR_CHANNEL → move `self.socket` onto the new TcpStream.
+      **The UKEY2 context and both sequence counters carry straight across**
+      (`bwu_manager.cc`: "using the same UKEY2 context for both the previous and
+      new EndpointChannels... UKEY2 uses sequence numbers for writes and reads"),
+      so keep `InnerState` and swap only the stream. That needs an
+      `UpgradableStream` trait — `InboundRequest<S>` is generic and can't be
+      handed a concrete `TcpStream` otherwise (tests run on `DuplexStream`).
+- [ ] **Hotspot (soft-AP)** — **transport PROVEN, but unreachable by design from
+      a WiFi-LAN connection. Code REMOVED 2026-07-17** (`hotspot_win.rs` +
+      `offer_hotspot_upgrade`) once the source below settled it — carrying an
+      unreachable path behind an `#[allow(dead_code)]` wasn't worth it. It's in
+      git history, `wifi_direct_win.rs` inherits its gateway logic verbatim, and
+      everything learned is recorded here. Resurrect only if #425/BLE lands and
+      makes `isWifiLanConnected()` false. The proto (frame types 8-12,
+      `WifiHotspotCredentials`, `BandwidthUpgradeRetryFrame`) is synced to current
+      google/nearby and stays.
+
+      **2026-07-16 — SETTLED FROM SOURCE. The earlier "Pixel firmware bug"
+      diagnosis was wrong, and so were three later guesses.** `bwu_manager.cc` in
+      google/nearby refuses a WIFI_HOTSPOT upgrade whenever the connection is
+      already WIFI_LAN — on *both* sides, as the first branch of each function:
+
+      ```cpp
+      // ProcessBwuPathAvailableEvent (receiving an offer)
+      if (channel_manager_->isWifiLanConnected() &&
+          ((upgrade_medium == Medium::WIFI_HOTSPOT) || ...)) {
+        LOG(INFO) << "... Don't do the BWU because this will destroy WIFI_LAN "
+                     "which will lead BWU fail and other endpoint connection fail";
+        RunUpgradeFailedProtocol(client, endpoint_id, upgrade_path_info);
+        return;
+      }
+      // InitiateBwuForEndpoint (sending one) has the mirror check and returns.
+      ```
+
+      So Google's own implementation would never send the offer we send, and
+      rejects it before reading a single credential. **No value of any field will
+      ever work while the connection is WiFi-LAN.** That exactly matches the
+      observed behaviour: `UPGRADE_FAILURE` inside one second, credentials echoed
+      back untouched, identical with `frequency: -1` and `frequency: 2437`.
+
+      **The transport itself is proven fine** — driven by hand, the phone
+      associates with our AP, takes a DHCP lease (192.168.137.34), routes to the
+      gateway, passes the firewall and reaches our listener on 8899 (arrived as a
+      plain HTTP GET from Chrome). The phone also genuinely *wants* an upgrade for
+      big payloads: with a 322 MB file it paused the transfer for 14s at
+      `ack_bytes: 0` before giving up and falling back to WiFi-LAN (45 MB doesn't
+      pause, so the threshold is between). Fallback is graceful — the 322 MB
+      completed. Two earlier "failures" were our own confounds: no firewall rule
+      on 8899, and a double-clicked Accept starting a second AP that invalidated
+      the credentials we'd just sent.
+
+      **Therefore, two ways forward, neither of which is this code as written:**
+      1. **WiFi Direct** (see above) — the *same* guard deliberately does not
+         block WIFI_DIRECT for a non-Windows client, so it is reachable from the
+         WiFi-LAN connections we already have. This is the near path.
+      2. **#425 / BLE** — a connection that didn't start on the LAN makes
+         `isWifiLanConnected()` false and unblocks WIFI_HOTSPOT too. The far path.
+
+      Groundwork saved either way: the soft-AP, the offer frame and the proto are
+      done and proven. **When resuming:** (1) pick WiFi Direct or BLE per above;
+      (2) build the channel-swap (Increment B: CLIENT_INTRODUCTION ack +
+      LAST_WRITE/SAFE_TO_CLOSE + move the encrypted stream); (3) fix the hotspot
+      lifetime and the accept guard below.
+
+      **Two defects found while testing, both still open:**
+      - `offer_hotspot_upgrade` does `std::mem::forget(hotspot)` to keep the AP
+        up "for the duration of the transfer". Tethering is *system* state, so
+        the AP survives the process: it stays on across app restarts until turned
+        off in Settings. Nothing owns its lifetime. Fix: hold the handle in
+        `InnerState` and drop it when the transfer ends or the connection dies.
+      - `accept_transfer` has no guard against running twice. Two clicks started
+        two soft-APs (the second invalidating the first's credentials) and
+        collided on port 8899. The UI now debounces this, but the backend should
+        not rely on the frontend for correctness.
 - [ ] **Bluetooth (Classic / RFCOMM)** — low-bandwidth fallback transport.
 - [ ] **WiFi Aware (NAN)** — newer; limited/uneven Windows support.
 - [ ] **WebRTC** — Quick Share uses it via signaling infrastructure; likely
@@ -81,11 +566,575 @@ best available one. Goal: support them all.
 
 ## Parked
 
-- [ ] **#425 — BLE receiver discoverability.** Advertisement format fully
-      reverse-engineered and unit-tested (see `BLE_RECEIVER_DISCOVERY.md`), but
-      needs a BLE **GATT server** (WinRT / bluer) to serve it, plus phase-2
-      transfer work. Untestable on current hardware (Pixel 10 doesn't reproduce
-      the AirDrop WiFi-drop). Parked with groundwork saved.
+- [x] **#425 — BLE receiver discoverability: WORKING (2026-07-20).** With WiFi
+      **off** on the phone, the PC now appears in Quick Share's target list.
+
+      **What it took — the three things that were each individually wrong:**
+      1. **Wrong WinRT API.** `BluetoothLEAdvertisementPublisher` makes *beacons*
+         (Microsoft's words). Real Quick Share receivers advertise
+         `isPrivateGatt=true` - a connectable **GATT service**. Switched to
+         `GattServiceProvider`. A beacon is never discovered as a ShareTarget no
+         matter how correct its bytes are.
+      2. **Must be connectable.** `IsConnectable=false` -> status 3 (Aborted); a
+         GATT service that can't be connected to won't advertise at all.
+         `IsConnectable=true` -> status 4 (StartedWithoutAllAdvertisementData):
+         Windows puts the 0xFEF3 UUID on-air and *drops* our 26-byte service data
+         (won't fit 31 bytes). **That's fine** - the UUID alone is enough for the
+         phone to find and connect; the payload travels over GATT.
+      3. **Serve the FULL advertisement over GATT, not the fast one.** The phone
+         connects and reads the slot-0 characteristic
+         `00000000-0000-3000-8000-000000000000`. We first served the *fast* form -
+         it read fine but carries **no device name**, so the phone could never
+         build a listable ShareTarget. Serving the non-fast full advertisement
+         (service_id_hash + endpoint_info **with the name** + bt_mac + uwb +
+         extra) made the PC appear.
+
+      **The diagnostic that broke it open:** logging on *our* side when the GATT
+      read is served (`*** served advertisement over GATT read ***`). Everything
+      before that was inference from the phone's logcat, where rotating BLE random
+      addresses make it impossible to tell our PC from a neighbour's phone - which
+      caused one wrong "it works" call (a discovered `deviceType=1` endpoint was a
+      neighbour, not us; see the 0x32 note). **Instrument your own side.**
+
+- [x] **#425 phase 2 — transfer over BLE: WORKING, throughput-limited
+      (2026-07-20).** A file sent from the phone with WiFi **off** is received,
+      decrypted and written correctly. Discovery -> Weave handshake -> UKEY2 ->
+      encrypted stream -> payload all run over the BLE socket, reusing the
+      existing `InboundRequest` (which is generic over `AsyncRead + AsyncWrite`,
+      so the whole Nearby stack rides a `tokio::io::duplex` unchanged).
+
+      **The four bugs, each of which looked like the previous one:**
+      1. **`handle()` services one frame and returns.** `TcpServer` wraps it in a
+         loop; the bridge called it once, so after the ConnectionRequest the task
+         ended, dropped its end of the duplex, and every later message was
+         discarded by a `let _ = send(..)`. No error anywhere. Loop it, and never
+         swallow a failed send.
+      2. **Weave counter is shared by control *and* data packets, per direction.**
+         The phone proves it: ConnectionRequest ctr 0, data 1-4, Error ctr 5. Our
+         ConnectionConfirm took ctr 0 and the data sender restarted at 0, so we
+         sent ctr 0 twice and got a Weave Error (`0xd2`).
+      3. **WinRT dispatches `WriteRequested` on threadpool threads.** BLE delivers
+         in order; our handlers do not run in order. A capture showed ctr=2
+         (last fragment) reassembled before ctr=1 (first), which emitted a
+         tail-only message and flushed ctr=1's head as a bogus "multiplex
+         control" frame -> D2D sequence 103 -> 104 -> session dead mid-file.
+         **Trust the counter, not arrival order:** park each packet in a slot and
+         consume only the expected one.
+      4. **`len` vs `buf.len()`.** The data branch moves `buf` into its slot; a
+         later block still guarded on the *original* `len` and indexed `buf[0]`,
+         panicking on every data packet. A panic in a WinRT callback can't unwind
+         across the `extern "system"` boundary, so it aborts - and Windows
+         reports that as `STATUS_STACK_BUFFER_OVERRUN`, i.e. "buffer overrun"
+         with an empty log. Guard on the live length.
+
+      **Where it stands: correctness is done, throughput is the blocker.**
+      Steady **20.5 KB/s** received. The phone pushes **41 KB/s** (its own
+      logcat: `Sent FILE data(2376328 bytes) via BLE used 55652 ms ... (41 KB/s)`)
+      and reports `SUCCESS, 100%` when the bytes leave Nearby for its socket -
+      which is why its progress bar runs ahead of ours and why a truncated file
+      still looks "sent". Oversubscribed ~2:1, the phone's stack jams
+      (`gatt_act_write() failed op_code=0x52 rt=143`, Android `143 =
+      GATT_CONGESTED`, repeating throughout), our indications back up
+      (`ind_count=11`), and an indication unconfirmed for 30 s obliges the stack
+      to drop the ACL - the phone logs `REMOTE_USER_TERMINATED_CONNECTION`, i.e.
+      **the PC killed the link**. Net effect: reliable under ~1.5 MB, fails above
+      it. The phone's own `KeepAlive timeout(30000 ms)` line is logged *after*
+      the disconnect and is a symptom, not the cause.
+
+      **Not yet established:** whether the 20.5 KB/s ceiling is our receive path
+      (~25 ms per 509-byte write, which would make it ours to fix) or the
+      connection interval (the central's choice, which WinRT does not expose to
+      a GATT server). ~25 ms/packet is suspiciously interval-shaped, but nobody
+      has timed the write handler. **Measure before concluding.** Candidate
+      fixes, in order: time the handler; drop `Indicate` from the server-tx
+      properties so our sends need no confirmation and cannot trigger the ATT
+      timeout that terminates the link (note: Notify-alone previously produced an
+      empty delivery list, so verify rather than assume); reduce per-write work.
+      Surviving slowly is worth more than dying fast - even at 20 KB/s a
+      transfer that never gets terminated eventually completes.
+
+      **Also learned:** per-packet logging on the receive path is not free. Three
+      `info!` calls inside the WinRT callback, plus a per-chunk `info!` in
+      `inbound.rs` and another Debug-formatting the whole `ChannelMessage` in
+      `main.rs`, throttled us below the phone's send rate and cost a 1.9 MB photo
+      40% of its bytes. All demoted to `trace`. Throughput accounting now lives
+      in the pump task, off the callback thread.
+
+      **The phone is asking for the upgrade.** `NearbySharing: timeout when
+      waiting for high-quality medium` / `HIGH_QUALITY_MEDIUM_SETUP duration:
+      68381, timeout: true` - it spends 68 s waiting for us to offer a faster
+      medium and never gets one. This BLE channel is exactly where that
+      negotiation belongs, and it makes the WiFi upgrade the other half of #425
+      rather than a separate feature.
+
+- [x] **Outbound over BLE (PC -> phone with WiFi off): WORKING (2026-07-20).**
+      A file sent from the PC now reaches a phone that has no WiFi at all.
+      `blea_send.rs` is the client half of the Weave socket and `blea_discovery.rs`
+      finds targets; both use **btleplug**, not WinRT, so unlike the receive path
+      this works on Linux too.
+
+      **Identifying the peer.** 0xFEF3 is a *shared* copresence service - a scan
+      in a populated area turns up plenty of devices running other Nearby
+      services, one of which answered our multiplex request with service hash
+      b7ef32. The name is the discriminator, and it comes from parsing the
+      advertisement with the inverse of the code that builds ours. Note the
+      asymmetry: Android fits the **fast** form (26 B) inside the 31-byte legacy
+      advertisement and broadcasts it inline, while Windows cannot - our 26 bytes
+      are dropped, leaving advertisement status 4 - which is why *we* serve the
+      **full** form from GATT. Reading slot 0 was therefore the wrong default:
+      connecting to 11 devices and reading none was that assumption, not 11 dull
+      devices.
+
+      **The service hash is per-peer and per-session, not a constant.** This was
+      the whole blocker. `fc 9f 5e` = SHA-256("NearbySharing")[:3] is what the
+      phone uses when it connects to *us*, but when we connect to *it* the phone
+      answers on its own hash - 3b4447, then 37330c on the next attempt.
+      Filtering inbound frames on fc9f5e discarded every reply as "multiplex
+      control", so `OutboundRequest` saw nothing, ended in `State::Initial`, and
+      the UI showed nothing at all happening. Control frames are prefixed
+      `00 00 00`; anything else is a service hash. Learn it from the peer's first
+      data frame and send on it.
+
+      **BLE addresses rotate.** One Pixel produced three addresses in two
+      minutes; each looked like a new device, so the same phone appeared in the
+      list repeatedly, and picking an older entry failed with "Not connected"
+      because that address no longer existed. The device *name* is the stable
+      identity: dedup and the peripheral registry key on it, and a rotated
+      address repoints every previously-seen address at the live peripheral so a
+      stale entry in the UI still connects.
+
+      **Flow control has to come from write-with-response.** `WriteType::
+      WithoutResponse` is fire-and-forget - the Windows stack accepts every
+      packet instantly and queues it - so `send_weave` returned immediately while
+      the radio was minutes behind. The transfer reported `Finished` in one
+      second, nothing then answered the phone's keepalives, and it timed out at
+      30s having received only part of the file. Three buffers were shrunk
+      chasing this (the duplex, the pump's accumulator, then reading one frame at
+      a time) and none mattered, because the real queue was in the Bluetooth
+      stack. `WithResponse` waits for the peer's ATT ack and is the only genuine
+      backpressure on this path.
+
+- [x] **The phone's Quick Share *extension* drops WiFi when sending
+      (2026-07-21).** Confirmed by disabling and force-stopping it on the phone:
+      WiFi then stays up through a phone -> PC send. This is on the phone, not
+      the PC, and not caused by anything here.
+
+      **It distorted a lot of measurement.** With the extension active the phone
+      drops WiFi the moment the send card opens, so by the time its
+      ConnectionRequest arrives `mediums (raw)` has no `5` (WIFI_LAN) - even when
+      WiFi was on a second earlier. We therefore read the peer as having no
+      network, offered a soft-AP, and it had to join ours. Some of what looked
+      like BLE congestion (25s for the phone to join the hotspot, 15s for
+      LAST_WRITE_TO_PRIOR_CHANNEL) is the phone rebuilding its network underneath
+      the negotiation, not link contention.
+
+      With it disabled the peer keeps WIFI_LAN and the WIFI_LAN upgrade applies:
+      meet it on the network it is already on, no radio switching, no join.
+      **Test with it disabled** unless deliberately exercising the hotspot path.
+
+- [x] **The intermittent "Missing required fields" is a role mismatch, not
+      stream corruption (2026-07-21).** Labelling the error sites finally caught
+      it: `expected Introduction, got Response`, in state
+      `ReceivedPairedKeyResult`.
+
+      In the Nearby flow the *sender* sends PairedKeyEncryption ->
+      PairedKeyResult -> Introduction, and the *receiver* answers with Response.
+      A Response arriving here means the peer believed **it** was the receiver
+      and that we were sending - while the BLE bridge treats every incoming
+      connection as an inbound transfer and waits for an Introduction that never
+      comes.
+
+      Reproduced by: send PC -> phone (completed over LAN), then ~26s later press
+      send on the phone. It connects over BLE still believing it is the receiving
+      side of the earlier exchange. Restarting the app clears it.
+
+      This is why every framing theory failed - reassembly was always clean, and
+      the cancel-safety fix (real, and worth keeping) did not eliminate it.
+
+      **Still to do:** detect a `Response` as the first post-handshake frame and
+      fail immediately with an honest message, surfaced to the UI, rather than a
+      confusing decode error and a hanging card.
+
+- [x] **Repeated transfers in both directions without restarting (2026-07-21).**
+      Four faults, each masking the next:
+
+      1. **The bridge was built once at startup.** When an `InboundRequest`
+         ended, the duplex and pump died with it, so every later BLE connection
+         got a Weave ConnectionConfirm and then talked to nobody. One failure
+         poisoned BLE receive until restart - which is why a restart only ever
+         bought one more attempt. It also leaked handshake state between
+         connections (`ClientInit` arriving at a request still in
+         `SentUkeyServerInit`). Now a Weave ConnectionRequest builds a fresh
+         session and the write handler routes into whichever is current.
+      2. **Neither side released the link.** The peer stays connected to our
+         GATT server after a transfer and we never disconnected our client
+         connection to it, so a transfer in one direction broke the next in the
+         other - symmetrically. Disconnect the peripheral when sending ends;
+         recycle the advertisement when a receive session ends.
+      3. **The recycle fired too early.** Dropping the link the moment
+         `InboundRequest` ended cut the phone off mid-completion: the PC had the
+         whole file and the phone sat on "sending" forever. 5s grace first. This
+         is a trade-off against (2) - that window is time the old connection is
+         still held.
+      4. **Cached peripheral handles go stale.** These are resolvable private
+         addresses that rotate every couple of minutes; once the peer moves, the
+         handle fails with "Not connected" though nothing is wrong with it.
+         Discovery only refreshes while scanning. A failed connect now rescans
+         once and matches by *name*, the only stable identity.
+
+      **The diagnostics did the work.** `peer already connected = false` killed
+      the contention theory in one line, and `peer accepted the Weave connection
+      then closed it without a word` correctly identified a phone that was
+      advertising but not on the receiving screen - which is a test-setup
+      requirement, not a bug: a phone accepts a connection only while actually
+      receiving.
+
+- [ ] **Outbound over BLE is capped at ~600 KB by the keepalive timeout.**
+      The send loop in `outbound.rs` writes chunk after chunk and does not read
+      from the socket until the whole file is done. Over TCP that is invisible;
+      over BLE a 1.9 MB file takes ~95s at 20 KB/s, during which we never answer
+      a KeepAlive, so the phone closes the connection at its 30s timeout -
+      measured exactly, twice. Anything sendable in under 30s works, which is why
+      a 182 KB file transferred fine.
+
+      Smaller payload chunks do **not** help: the loop never reads between
+      chunks, so total send time is unchanged.
+
+      The fix is to service inbound frames while sending, and the hard part is
+      cancel-safety - `stream_read_exact` cannot simply be raced against a
+      timeout, because a cancelled partial read loses bytes and desyncs the
+      stream (the same class of bug as the Weave reassembly). Either a reader
+      task feeding frames over a channel with the crypto state behind a mutex, or
+      a buffered reader that can be polled without committing to a whole frame.
+      This touches the TCP path too, so it wants doing deliberately.
+
+      Note the asymmetry with receiving: `InboundRequest::handle()` services one
+      frame per call in a caller-owned loop, so it interleaves naturally. Only
+      the send side has this problem.
+
+- [ ] **No bandwidth upgrade when we are the sender — and the earlier diagnosis
+      was WRONG (corrected 2026-07-21).**
+
+      This was recorded four times as "a phone acting as receiver will not
+      upgrade", inferred from silence after we offered. Its own logcat says
+      otherwise:
+
+      ```text
+      BandwidthUpgradeManager is attempting to upgrade endpoint 1Fr0 with a new
+        bandwidth upgrade medium WIFI_LAN.
+      E: WifiLanBandwidthUpgradeMedium couldn't initiate the WIFI_LAN upgrade
+        because it failed to start listening for incoming Wifi connections
+      [BandwidthUpgradeProtocol] Reset BandwidthUpgradeState because we have
+        tried on all mediums.
+      Retry bandwidth upgrade after 32000 ms
+      ```
+
+      **The phone wants to be the host.** It picks WIFI_LAN, tries to listen for
+      incoming connections, fails because its WiFi is off, and retries the same
+      medium every 32s forever. It never evaluates our UPGRADE_PATH_AVAILABLE
+      because it is not looking for one - it is driving its own upgrade.
+
+      **And its medium set collapses to one entry:**
+      `[BandwidthUpgradeState] 6GHz: [], 5GHz: [], 2.4GHz: [WIFI_LAN]` - so
+      WIFI_HOTSPOT is never considered, even though both sides list it elsewhere
+      (`upgradeMediums:[USB, WIFI_LAN, WIFI_DIRECT, WIFI_AWARE, WIFI_HOTSPOT,
+      ...]`). Why the negotiation narrows to WIFI_LAN alone is the thing to
+      attack; the offer itself is not the problem.
+
+      **RESOLVED (2026-07-21).** The phone hosts when it receives; we join. Added
+      `wifi_join_win.rs` (WiFiAdapter client), act on the phone's
+      UPGRADE_PATH_AVAILABLE by joining its AP at 192.168.49.1 and introducing
+      ourselves as the client. Key fixes along the way: answer
+      BandwidthUpgradeRetry on the send path so WIFI_HOTSPOT enters the
+      negotiated set (it collapsed to WIFI_LAN without it); a head-start window
+      that *drives* the upgrade (announce mediums + request path, re-nudge)
+      rather than waiting; don't re-send UPGRADE_PATH_REQUEST after switching
+      (it poisoned the payload stream); wait for a DHCP address on the peer's
+      subnet before connecting; carry the partial frame across the switch; and
+      **raise the payload chunk from 32 KB to 512 KB once upgraded** - that was
+      the throughput fix, 40 KB/s -> 2-5 MB/s.
+
+      **STATUS (end of 2026-07-22): on by default, all four cases working.**
+      The env gate is gone. Measured end to end:
+
+      | phone WiFi | direction   | medium                        |
+      | ---------- | ----------- | ----------------------------- |
+      | on         | PC -> phone | WIFI_LAN, ~5.3 MB/s           |
+      | on         | phone -> PC | WIFI_LAN, ~3.8 MB/s           |
+      | off        | PC -> phone | WIFI_HOTSPOT (phone hosts), ~6.1 MB/s |
+      | off        | phone -> PC | WIFI_HOTSPOT (we host)        |
+
+      Three of the four intermittent causes listed here previously are
+      resolved, and the diagnosis of two of them was wrong:
+
+        1. *(still open)* First BLE connection after launch fails the UKEY2
+           handshake; a re-send works. Now seen inbound too - the first
+           phone -> PC after an outbound send ends in state Initial without a
+           ConnectionRequest. Auto-retry was tried and reverted (shutdown hang).
+        2. *(fixed)* The phone's WiFi-Direct GO isn't in the first WiFi scan -
+           driven by AvailableNetworksChanged rather than a flat retry.
+        3. *(fixed)* "After the switch the phone doesn't drain the WiFi socket"
+           was two of our own bugs, not the phone's. We sent LAST_WRITE after
+           SAFE_TO_CLOSE, on a channel we had just told the peer it could
+           close; and we never closed the multiplex service channel, which is
+           what the peer's read loop waits for before it leaves the old medium.
+           The earlier note that closing BLE "made it worse" was correct about
+           the *action* taken - dropping the GATT link - and wrong about the
+           conclusion: closing the multiplex channel while keeping GATT up is
+           exactly what was needed.
+        4. *(not coexistence)* The pre-switch BLE phase was not being dragged by
+           WiFi/BLE coexistence - the Weave packet counter shows zero losses
+           across every capture. The ten-second stall at the switch was payload
+           chunk granularity: nothing else happens while a chunk is being
+           written, so a 32 KB chunk at ~7 KB/s meant the medium switch could
+           not land for ~5s after the event. Chunks are 8 KB over BLE now and
+           the switch lands in the same second.
+
+      Also still open:
+        - Joining the phone's AP installs a default route (0.0.0.0 via
+          192.168.49.1) - harmless with Ethernet holding the real route, but
+          should be suppressed.
+      **The phone dropping WiFi when it sends is the WiFi Direct wedge, not a
+      Quick Share behaviour.** Observed again on 2026-07-22: phone -> PC arrived
+      over BLE with `ap_frequency=-1` and no WIFI_LAN in its medium list, and
+      our own mDNS discovery watched the phone's service disappear from the
+      network moments before it connected - so it fell back to the AP we host,
+      costing ~21s of association. Toggling the Quick Share extension off and on
+      restored it, and phone -> PC then went over WIFI_LAN in two seconds. That
+      is the documented reset for a wedged P2P stack (see the WiFi Direct entry's
+      testing gotcha). Do not re-diagnose it as our advertising, and do not
+      conclude the LAN path is broken - check for the wedge first.
+
+      **Historical threads (now moot):**
+      1. Why does the set collapse to `[WIFI_LAN]`? Our ConnectionRequest now
+         declares `[WIFI_HOTSPOT, WIFI_LAN]`, so the intersection should be
+         wider. Check whether the declaration is reaching it, and what else
+         feeds that set (MediumRole? supported_wifi_direct_auth_types?).
+      2. Will it ever take the *client* role, or does it always insist on
+         hosting? If it always hosts, then PC -> phone with WiFi off cannot
+         upgrade at all - the phone cannot host without WiFi - and the honest
+         answer is that this case stays on BLE.
+
+      **Lesson:** "peer ignored it" is not a measurement. Four rounds were spent
+      on that inference before anyone read the peer's own log, which named the
+      cause in one line.
+
+- [x] **Bandwidth upgrade to WIFI_HOTSPOT over the BLE channel: WORKING
+      (2026-07-20).** A file sent from a phone with WiFi **off** now arrives over
+      WiFi in ~11s instead of ~2min over BLE, with only ~3 KB ever crossing BLE.
+      Tethering is torn down with the transfer.
+
+      **The two things that were wrong, both about sequencing:**
+      1. **The phone never asks.** Our path was entirely reactive -
+         `send_supported_mediums` on BandwidthUpgradeRetry, the offer on
+         UPGRADE_PATH_REQUEST - and over BLE the phone sends *neither*, while
+         its own log spends 68s on `timeout when waiting for high-quality
+         medium`. Both sides waited for the other. UPGRADE_PATH_AVAILABLE is now
+         pushed unsolicited right after the user accepts, which is what
+         grishka's PROTOCOL.md describes ("after the transfer is accepted, the
+         server may ask the client for a bandwidth upgrade").
+      2. **Switching at CLIENT_INTRODUCTION_ACK is too early.** The client then
+         sends LAST_WRITE_TO_PRIOR_CHANNEL on the *old* channel and will not use
+         the new socket until it gets SAFE_TO_CLOSE_PRIOR_CHANNEL back. Tearing
+         the BLE bridge down at the ACK left that frame arriving at nothing and
+         the phone cancelled the transfer. The socket is now held from the ACK
+         until SAFE_TO_CLOSE has gone out over BLE.
+
+      **Why the swap is small:** TCP framing is byte-for-byte what
+      `InboundRequest` already reads off the BLE bridge's duplex - only the
+      Weave and multiplex wrappers were ever BLE-specific. So the pump just
+      `copy_bidirectional`s the new socket into the duplex and the encrypted
+      stream (keys, sequence numbers) carries straight over. `InboundRequest`
+      needed no changes.
+
+      **Why hotspot and not WiFi Direct:** Windows can only host
+      `WIFI_DIRECT_WITH_DEVICE_NAME`, needing Wi-Fi P2P device discovery — the
+      2026-07-16 dead end. A soft-AP is ssid/password/gateway/port the phone
+      joins as an ordinary client. `hotspot_win.rs` was restored from `908ab5b^`,
+      where it had been removed with the note "it's in git history if BLE ever
+      makes it reachable"; BLE made it reachable, because with the phone's WiFi
+      off its ConnectionRequest omits WIFI_LAN and the "this will destroy
+      WIFI_LAN" objection no longer applies. WiFi Direct remains behind
+      `RQS_TRY_WIFI_DIRECT_UPGRADE=1`.
+
+      **`NetworkOperatorTetheringManager` is not agile.** Unlike the WiFi Direct
+      types it is apartment-threaded, so holding one in `InboundRequest` made
+      that struct neither `Send` nor `Sync` and broke every `tokio::spawn`
+      carrying one — including the plain TCP path. It lives on its own thread;
+      only a stop signal crosses. Do not "fix" this with `unsafe impl Send`.
+
+      **Why hotspot, having previously deleted it.** It was removed in `908ab5b`
+      because google/nearby's `bwu_manager.cc` rejects WIFI_HOTSPOT while
+      WIFI_LAN is up ("this will destroy WIFI_LAN"), with the note *"it's in git
+      history if BLE ever makes it reachable"*. BLE made it reachable: over the
+      BLE socket the phone's WiFi is off, so its ConnectionRequest **omits
+      WIFI_LAN entirely** and lists `[WIFI_DIRECT, WIFI_AWARE, WIFI_HOTSPOT,
+      WEB_RTC, BLE_L2CAP, BLUETOOTH, BLE, NFC]`. The condition that removed
+      hotspot no longer holds. `hotspot_win.rs` restored verbatim from
+      `908ab5b^`.
+
+      Hotspot over WiFi Direct because Windows can only host
+      `WIFI_DIRECT_WITH_DEVICE_NAME` (needs Wi-Fi P2P device discovery, and the
+      phone's GMS wants ssid/password it cannot get) — that is the 2026-07-16
+      dead end. A soft-AP is ssid/password/gateway/port that the phone joins as
+      an ordinary client. The old path is still there behind
+      `RQS_TRY_WIFI_DIRECT_UPGRADE=1`.
+
+      **Wired so far:** `send_supported_mediums` now claims
+      `[WIFI_HOTSPOT, WIFI_DIRECT]` (it previously claimed WIFI_LAN, useless to
+      a peer with no WiFi up, and a medium whose code had been deleted);
+      `ensure_hotspot()` starts the soft-AP on a blocking thread and begins
+      accepting on 8899 *before* the offer goes out; `offer_wifi_hotspot_upgrade()`
+      sends UPGRADE_PATH_AVAILABLE with the credentials. The existing
+      `introduce_upgraded_channel` (CLIENT_INTRODUCTION/ACK, #27) is reused
+      unchanged. `WindowsHotspot` now has a `Drop` that stops tethering, so the
+      radio isn't left in AP mode.
+
+      **Only offer it to a peer that has no network.** A phone with WiFi *on*
+      advertises WIFI_LAN in its ConnectionRequest, and offering that peer a
+      soft-AP asks it to leave the network it already has - which google/nearby
+      refuses outright ("this will destroy WIFI_LAN"). Measured: such a phone
+      completed the entire upgrade handshake (joined the AP, introduced itself,
+      ACKed, LAST_WRITE/SAFE_TO_CLOSE) and then sent nothing on the new socket,
+      hanging the transfer indefinitely. The offer is now skipped when the peer
+      advertises WIFI_LAN, and the switch requires the first byte within 20s so a
+      silent peer is a logged failure rather than a hang.
+
+      **Still to do:** swap the encrypted stream onto the accepted socket (#28) —
+      today `introduce_upgraded_channel` completes the introduction and the
+      transfer stays on BLE, so this will not be faster until that lands.
+
+      **Watch for on first run:** starting tethering drives the *same radio*
+      into soft-AP mode, and "something turns WiFi off when I send" has bitten
+      this repo before. If the PC's own WiFi drops when the offer goes out, that
+      is this, not a regression elsewhere.
+
+      **PHASE 2 (transfer over BLE) - socket is OPEN, data is flowing
+      (2026-07-20).** With WiFi off the phone now connects and streams the real
+      Nearby protocol to us. What it took:
+
+      - Medium is **BLE** (`attempting to connect to endpoint X over mediums
+        [BLE]`), not Bluetooth Classic or L2CAP. With WiFi off, availableMediums
+        has no WIFI_LAN, so BLE is the initial channel.
+      - Socket layer is **uWeave** over two GATT characteristics on our 0xFEF3
+        service (`MultiplexBleSocketImpl`):
+          client tx (phone -> us, write)  = 00000100-0004-1000-8000-001a11000101
+          server tx (us -> phone, notify) = 00000100-0004-1000-8000-001a11000102
+        Missing the first gives `missing client tx characteristic ...0101`.
+      - **server tx must declare Notify AND Indicate.** With Notify alone
+        `NotifyValueAsync` returned an *empty* result list - delivered to nobody -
+        even though `SubscribedClients()` said 1. That empty list is the tell.
+      - **Weave handshake:** phone writes ConnectionRequest
+        `[0x80][ver_min u16][ver_max u16][max_packet u16]` (observed
+        `80 00 01 00 01 01 fd` = v1..v1, 509 B). We must reply with
+        ConnectionConfirm `[0x81][version u16][packet_size u16]` as a
+        notification. Without it: `GATT_SWITCH_TO_DATA_TRANSFERRING_FAILED
+        [TIMEOUT]`, then the phone sends control `[0x92]` (command 2 = Error).
+      - Do **not** block on `.get()` inside a WinRT event handler - 0x8000000E
+        (E_ILLEGAL_METHOD_CALL). A worker thread doesn't work either (IBuffer
+        isn't Send). Use an `AsyncOperationCompletedHandler`.
+
+      **Wire format once open** (first byte = Weave header, bit7 clear = data,
+      bits 6-4 = packet counter, low nibble = first/last fragment flags):
+      ```
+      1c | 00 00 00 08 | 01 12 1f 0a 03 fc 9f 5e ...
+      28 | fc 9f 5e | 00 00 02 ac | 08 01 12 a7 05 ...   (first fragment)
+      34 | 36 ab 31 d3 ...                                (last fragment)
+      ```
+      Inside: `fc 9f 5e` = service_id_hash, then a **4-byte BE length + protobuf
+      OfflineFrame** - the same framing the TCP path already parses. Note
+      "Multiplex" in the class name and the packets whose payload starts
+      `00 00 00 08` without the hash: there is a multiplex/control layer to work
+      out alongside the Nearby frames.
+
+      **MULTIPLEX LAYER DECODED (2026-07-20).** After Weave reassembly there are
+      two kinds of message, told apart by the first 3 bytes:
+
+      1. **`fc 9f 5e` = NearbySharing data.** Framing:
+         `[service_id_hash(3)][u32 BE length][OfflineFrame protobuf]`
+         **Strip the 3-byte hash and the rest is byte-identical to what the TCP
+         path already parses** (`[u32 len][frame]`). Observed: a 681-byte frame
+         containing "Aaron's Pixel 10 Pro" (ConnectionRequest) and a 136-byte
+         frame with `AES_256_CBC-HMAC_SHA256` + 32-byte commitment + 64-byte key
+         (UKEY2 ClientInit). So the phone runs the *normal* handshake over BLE.
+      2. **`00 00 00` = multiplex control.** `[00 00 00][protobuf]`, no length
+         field. e.g. `08 01 12 1f 0a 03 fc9f5e 10 02 1a 16 "<22-char id>"` -
+         channel setup naming the service - and `08 02 1a 05 0a 03 fc9f5e`.
+
+      **Bridge plan:** weave-reassembled message -> if it starts `fc 9f 5e`, drop
+      those 3 bytes and feed `[u32 len][frame]` into a duplex stream -> hand the
+      other half to `InboundRequest` (generic, unchanged). Outbound: take what
+      `InboundRequest` writes, prepend `fc 9f 5e`, fragment to (packet_size-1)
+      byte Weave data packets with header
+      `(counter<<4) | (first<<3) | (last<<2)`, notify on server-tx.
+      Note WinRT constraint: the GATT objects aren't `Send`, so the notify side
+      must stay on the thread that owns the provider - use channels to reach it.
+
+      **Remaining:** implement that bridge, answer the multiplex control frames,
+      then Linux/bluer parity.
+      **Correction:** an earlier "discovery worked" reading was a mis-attribution
+      - the discovered endpoint (GZON, `deviceType=1` phone, "Christine's Pixel 9
+      Pro") was *another phone* in the area advertising as a receiver, NOT our PC
+      (`deviceType=3`). That also explains the "0x32" endpoint_info byte that
+      matched no version of our code: `(0x32>>1)&7 = 1 = phone`. So our own
+      advertisement has **never been confirmed discovered**; do not claim it is.
+
+      State that IS solid:
+      - Our advertiser is on-air: WinRT publisher reaches status 2 (Started),
+        26-byte fast advertisement under 0xFEF3.
+      - `nRF` is useless as a probe here (can't see even the known-good 0xFE2C
+        wake beacon). The phone's logcat is the only working probe, and it only
+        logs adverts it *successfully* parses.
+      - **Google's own Windows Quick Share IS discovered by this phone with WiFi
+        off** (deviceType=3 laptop, listed + transferable), so a Windows PC can be
+        a BLE receiver. Our bytes/method still differ from Google's somehow.
+
+      **SOLID NEGATIVE + prime suspect nailed (2026-07-20).** Clean test: our
+      advertiser Started/on-air 18:02:42-18:05:37; phone scanned FOREGROUND
+      low-latency in many bursts 18:03:33-18:04:57 (fully inside); **found nothing
+      at all** - no `Found BleAdvertisement`. Windows says Started but isn't
+      radiating it discoverably.
+      **Why: 2 bytes over the legacy 31-byte limit.** Compare the wake beacon
+      (`blea_win` 0xFE2C) that provably radiates (phone reacts to it):
+        wake:  UUID(2) + payload(24) = 26  +AD(2) +flags(3) = 31  (fits exactly)
+        ours:  UUID(2) + payload(26) = 28  +AD(2) +flags(3) = 33  (overflows by 2)
+      Fix options, in order of cheapness:
+        1. Suppress the flags AD (WinRT `BluetoothLEAdvertisement.Flags`; a
+           non-connectable advert may not need it) -> 30 bytes, fits.
+        2. Extended advertising + the *fast* payload (we only ever tried extended
+           with the big non-fast advert). Phone scans extended (is-extended-advert
+           =true), so this should be catchable.
+        3. Trim 2+ bytes from the payload (deviates from Google's exact bytes;
+           last resort).
+      Google's advert is the same ~26 bytes and IS discovered, so Google must be
+      doing (1) or (2) - worth confirming.
+
+      **RESUME HERE (next session):** option 2 is now in `blea_recv_win.rs` -
+      `SetUseExtendedAdvertisement(true)` + the fast payload under 0xFEF3. Build,
+      run, and capture logcat while the phone scans FOREGROUND (send sheet open,
+      WiFi off) for ~30s. Verdict test: grep the logcat for `Found BleAdvertisement`
+      and specifically a **`deviceType=3`** discovery = us (a laptop). `deviceType=1`
+      is a neighbour's phone - do NOT mistake it for us again (that was the 0x32
+      mis-read). If extended still isn't found, the issue is Windows not radiating
+      our custom service data discoverably at all; next compare exactly how Google's
+      Windows app advertises (legacy+no-flags vs extended). Our advertiser reaching
+      status 2 (Started) is necessary but NOT proof it's on-air - the phone finding
+      it is the only proof.
+
+      The FAST format itself is almost certainly right (byte-matched to Google's
+      captured advertisement); the open question is Windows radiating it
+      discoverably. Format in `ble_receiver.rs`:
+        Layer 3 fast: `[0x23][endpoint_id(4)][info_len(1)][endpoint_info(17)]`
+        Layer 2 fast: `[0x4A][data][device_token(2)]`  in 0xFEF3 service data.
+      Later milestones once discovered: identity/name resolution (GATT server,
+      `isPrivateGatt`/`rxAdvertisement`), then phase-2 transfer.
+      **More valuable than it looked (2026-07-16):** a connection that didn't
+      start on the LAN makes google/nearby's `isWifiLanConnected()` false, which
+      is what unblocks the WIFI_HOTSPOT upgrade (see the Hotspot entry). It is
+      *not* the only route though — WiFi Direct is reachable from a plain
+      WiFi-LAN connection today, and needs no new discovery mechanism. Treat BLE
+      as the strategic path (it also enables sharing with no shared network at
+      all, which is the real feature) and WiFi Direct as the near one.
 - [ ] **Skip the receiver's accept prompt on a QR send.** The mechanism is
       documented: put an ECDSA signature of the UKEY2 auth key (IEEE P1363
       format, R||S, 64 bytes) into `qr_code_handshake_data` inside the
@@ -126,6 +1175,39 @@ best available one. Goal: support them all.
   verification is the whole point of contacts mode), not a hard problem to grind
   through. QR sharing solves the real underlying need instead.
 - Upstream candidates to PR to Martichou/rquickshare: Windows support, the log
-  fixes, send-text.
+  fixes, send-text. **Caveat: Martichou appears inactive**, so these may have
+  nowhere to land — see the mdns-sd note below.
+- **mdns-sd: migrated off the fork (2026-07-16).** We were pinned to
+  `Martichou/mdns-sd` **branch** `unsolicited`, which is a snapshot of upstream
+  **0.10.4 (Feb 2024)**. Now on the published `mdns-sd = "0.20"` from
+  `keepsimple1/mdns-sd` — the real crate; Martichou's is a fork *of* it, and
+  keepsimple1 is active (0.20.1, Jun 2026).
+  - **Why it mattered beyond tidiness:** mDNS parses untrusted multicast input,
+    and we were missing two years of parser hardening — name-compression loop
+    (#257), `read_u16` length checks (#234), RDATA length checks, and "sanity
+    checks in DNS message decoding to prevent unnecessary panics" (#169). A
+    branch pin is also a live supply-chain risk: it can move under us or vanish.
+  - **It also deleted an ERROR for free.** `Failed to send to 224.0.0.251:5353
+    via <192.168.137.1>` fired every transfer once WiFi Direct started bringing
+    an interface up and tearing it down under mDNS. The fork error-logs *every*
+    failed send; upstream refactored that path away and has exactly **one**
+    `error!` in the whole daemon. Not suppressed — gone.
+  - **What the fork actually added — and the real PR to send.** Not
+    `AddrType`, not unsolicited *sending*: it was **`register_resend()`**, a
+    public forced re-announcement, used when BLE sees a phone start discovery
+    (Android misses our service if we registered before it started scanning).
+    Upstream has the machinery (`Command::RegisterResend`,
+    `send_unsolicited_response`) but never exposes it. We now call `register()`
+    again instead, which upstream documents as the way to re-announce and which
+    sends the unsolicited response immediately. **If that proves slower or
+    noisier than a dedicated call, `register_resend` is a genuine upstream gap
+    and worth a PR to keepsimple1** — he merges outside contributions readily.
+  - API deltas handled: `enable_addr_auto(AddrType::V4)` →
+    `enable_addr_auto()` + `set_interfaces(vec![IfKind::IPv4])` (per-service,
+    strictly better than the fork's global enum); `ServiceResolved(ServiceInfo)`
+    → `ServiceResolved(Box<ResolvedService>)` (auto-derefs, so call sites are
+    unchanged); addresses are now `ScopedIp` → `.to_ip_addr()`.
+  - **Needs a real send *and* receive test**, not just a compile: this is the
+    discovery path that feeds the UI.
 - Autostart: build/install the release, then enable Start on boot + Keep running
   on close + Start minimized.

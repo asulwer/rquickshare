@@ -34,6 +34,7 @@ tauri-plugin-clipboard-manager = "2.2"
 time = { version = "0.3", features = ["formatting"] }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "sync", "time", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+tauri-plugin-opener = "2.5.4"
 
 [features]
 # by default Tauri runs in production mode

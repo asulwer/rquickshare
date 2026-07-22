@@ -20,10 +20,63 @@ pub use blea::*;
 mod blea_win;
 #[cfg(all(feature = "experimental", target_os = "windows"))]
 pub use blea_win::*;
-// Not started yet (issue #425 needs a GATT server); kept as groundwork.
+// BLE receiver advertiser (issue #425). Broadcasts the 0xFEF3 discoverable
+// header so a phone doing BLE-only discovery can list us. Serving the *full*
+// advertisement (GATT / extended adv) is the next milestone.
 #[cfg(all(feature = "experimental", target_os = "windows"))]
 mod blea_recv_win;
+#[cfg(all(feature = "experimental", target_os = "windows"))]
+pub use blea_recv_win::*;
+// Pure byte-format builders for the BLE receiver advertisement, unit-tested.
+// Compiled only where their sole consumer (blea_recv_win) is, so nothing is
+// dead code on other targets - no blanket `allow(dead_code)` needed.
+// Not Windows-only any more: the send path parses a *peer's* advertisement with
+// the same code that builds ours, and that path runs on Linux too.
+#[cfg(feature = "experimental")]
 mod ble_receiver;
+#[cfg(feature = "experimental")]
+pub use ble_receiver::{parse_full_advertisement, parse_peer_advertisement};
+// Reads the negotiated ATT MTU, which btleplug does not expose. Windows-only
+// because it goes to WinRT for it; the send path falls back to a conservative
+// packet size everywhere else.
+#[cfg(all(feature = "experimental", target_os = "windows"))]
+mod ble_mtu_win;
+#[cfg(all(feature = "experimental", target_os = "windows"))]
+pub use ble_mtu_win::*;
+// BLE *client* half of the Weave socket, for sending to a phone with WiFi off.
+// btleplug rather than WinRT, so this one works on Linux too.
+#[cfg(feature = "experimental")]
+mod blea_send;
+#[cfg(feature = "experimental")]
+pub use blea_send::*;
+// Finds phones advertising as receivers over BLE, so there is something to send
+// to when the peer has no IP.
+#[cfg(feature = "experimental")]
+mod blea_discovery;
+#[cfg(feature = "experimental")]
+pub use blea_discovery::*;
+// Windows soft-AP for the WIFI_HOTSPOT bandwidth-upgrade medium. Removed in
+// 908ab5b because a phone can never accept that upgrade from a WiFi-LAN
+// connection - with the note "it's in git history if BLE ever makes it
+// reachable". BLE did: over the BLE socket the phone's ConnectionRequest omits
+// WIFI_LAN entirely (its WiFi is off) and advertises WIFI_HOTSPOT, so the
+// objection that removed this no longer applies. Restored verbatim.
+// Joining a peer's AP, for when the *phone* hosts the upgrade medium.
+#[cfg(all(feature = "experimental", target_os = "windows"))]
+mod wifi_join_win;
+#[cfg(all(feature = "experimental", target_os = "windows"))]
+pub use wifi_join_win::*;
+#[cfg(all(feature = "experimental", target_os = "windows"))]
+mod hotspot_win;
+#[cfg(all(feature = "experimental", target_os = "windows"))]
+pub use hotspot_win::*;
+// Windows WiFi Direct group owner for the WIFI_DIRECT bandwidth-upgrade medium.
+#[cfg(all(feature = "experimental", target_os = "windows"))]
+mod wifi_direct_win;
+#[cfg(all(feature = "experimental", target_os = "windows"))]
+pub use wifi_direct_win::*;
+mod frame_reader;
+pub use frame_reader::*;
 mod inbound;
 pub use inbound::*;
 pub(crate) mod info;

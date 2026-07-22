@@ -43,6 +43,37 @@ fn bind_dual_stack(port: u32) -> Result<TcpListener, anyhow::Error> {
     Ok(TcpListener::from_std(socket.into())?)
 }
 
+/// Log panics before they reach a foreign callback boundary.
+///
+/// A panic inside a WinRT `TypedEventHandler` cannot unwind across the
+/// `extern "system"` boundary, so the runtime aborts instead - and Windows
+/// reports that abort as STATUS_STACK_BUFFER_OVERRUN, which surfaces to the
+/// user as a "buffer overrun" crash with *nothing* in the log. The hook runs
+/// before unwinding starts, so it is the only place the real message and
+/// location survive. Also goes to stderr, because the file logger may never
+/// get a chance to flush.
+fn install_panic_logger() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let loc = info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .unwrap_or_else(|| "unknown location".to_string());
+            let msg = info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "<non-string panic payload>".to_string());
+            eprintln!("PANIC at {loc}: {msg}");
+            error!("PANIC at {loc}: {msg}");
+            default(info);
+        }));
+    });
+}
+
 pub mod channel;
 mod errors;
 mod hdl;
@@ -129,6 +160,8 @@ impl RQS {
     pub async fn run(
         &mut self,
     ) -> Result<(mpsc::Sender<SendInfo>, broadcast::Receiver<()>), anyhow::Error> {
+        install_panic_logger();
+
         let tracker = TaskTracker::new();
         let ctoken = CancellationToken::new();
         self.tracker = Some(tracker.clone());
@@ -159,14 +192,22 @@ impl RQS {
             send_channel.1,
         )?;
         let ctk = ctoken.clone();
-        tracker.spawn(async move { server.run(ctk).await });
+        tracker.spawn(async move {
+            if let Err(e) = server.run(ctk).await {
+                error!("TcpServer: stopped with an error: {e}");
+            }
+        });
 
         #[cfg(feature = "experimental")]
         {
             // Don't threat BleListener error as fatal, it's a nice to have.
             if let Ok(ble) = BleListener::new(self.ble_sender.clone()).await {
                 let ctk = ctoken.clone();
-                tracker.spawn(async move { ble.run(ctk).await });
+                tracker.spawn(async move {
+                    if let Err(e) = ble.run(ctk).await {
+                        error!("BleListener: stopped with an error: {e}");
+                    }
+                });
             }
         }
 
@@ -179,13 +220,42 @@ impl RQS {
             self.visibility_receiver.clone(),
         )?;
         let ctk = ctoken.clone();
-        tracker.spawn(async move { mdns.run(ctk).await });
+        // Log the outcome rather than dropping it. These `run` methods return
+        // Result and use `?` internally (e.g. `daemon.register(..)?`), so a
+        // single failure ends the task - and with the Result discarded, the
+        // service just silently stops existing. That is exactly how a bare
+        // hostname failing mdns-sd's `.local.` check looked: "service starting",
+        // "visibility changed: Visible", then nothing, forever, with no error.
+        tracker.spawn(async move {
+            if let Err(e) = mdns.run(ctk).await {
+                error!("MDnsServer: stopped with an error: {e}");
+            }
+        });
 
-        // NOTE (issue #425): a BLE "receiver" advertiser is implemented in
-        // hdl::BleReceiverAdvertiser (with the ble_receiver builders, see
-        // BLE_RECEIVER_DISCOVERY.md) but is intentionally NOT started here.
-        // Making a phone list rquickshare over BLE additionally requires a BLE
-        // GATT server to serve the full advertisement, which is not implemented.
+        // BLE receiver advertiser (issue #425). Broadcasts the 0xFEF3
+        // discoverable-endpoint header so a phone doing BLE-only discovery (WiFi
+        // off) can list us. Milestone M1 is just "header on-air, visible to nRF
+        // Connect"; getting the phone to actually list us (M2) needs the full
+        // advertisement served over GATT or extended advertising - next step.
+        // Non-fatal: like BleListener, it's a nice-to-have.
+        #[cfg(all(feature = "experimental", target_os = "windows"))]
+        {
+            let ble_recv = crate::hdl::BleReceiverAdvertiser::new(
+                endpoint_id[..4].try_into()?,
+                crate::utils::DeviceType::Laptop as u8,
+                ::hostname::get()
+                    .map(|h| h.to_string_lossy().into_owned())
+                    .unwrap_or_else(|_| "rquickshare".to_string()),
+                self.message_sender.clone(),
+            );
+            let ctk = ctoken.clone();
+            tracker.spawn(async move {
+                if let Err(e) = ble_recv.run(ctk).await {
+                    error!("BleReceiverAdvertiser: stopped with an error: {e}");
+                }
+            });
+        }
+
         tracker.close();
 
         Ok((send_channel.0, self.ble_sender.subscribe()))
@@ -246,11 +316,37 @@ impl RQS {
             });
         }
 
+        // Discover BLE receivers alongside mDNS. mDNS only ever finds peers
+        // that share a network with us; a phone with WiFi off is invisible to
+        // it and reachable only over BLE.
+        #[cfg(feature = "experimental")]
+        {
+            // Fresh start: a peer that has left the network must not stay
+            // suppressed from the BLE list by a stale entry.
+            crate::hdl::clear_lan_peers();
+            let ctk_bled = ctk.clone();
+            let ble_sender = sender.clone();
+            tracker.spawn(async move {
+                match crate::hdl::BleDiscovery::new(ble_sender).await {
+                    Ok(d) => {
+                        if let Err(e) = d.run(ctk_bled).await {
+                            error!("BleDiscovery: stopped with an error: {e}");
+                        }
+                    }
+                    Err(e) => error!("Couldn't init BleDiscovery: {e}"),
+                }
+            });
+        }
+
         let mut discovery = MDnsDiscovery::new(sender)?;
         if let Some(session) = qr_session {
             discovery = discovery.with_qr_session(session);
         }
-        tracker.spawn(async move { discovery.run(ctk.clone()).await });
+        tracker.spawn(async move {
+            if let Err(e) = discovery.run(ctk.clone()).await {
+                error!("MDnsDiscovery: stopped with an error: {e}");
+            }
+        });
 
         Ok(())
     }

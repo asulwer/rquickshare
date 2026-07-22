@@ -63,6 +63,10 @@ async fn main() -> Result<(), anyhow::Error> {
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
+        // `shell`'s `open` validates against a default allowlist of mailto:,
+        // tel: and http(s):// - so a filesystem path is rejected as "not a
+        // valid URI". `opener` is v2's replacement and handles paths properly.
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             cmds::change_download_path,
             cmds::change_logging_level,
@@ -298,7 +302,16 @@ fn rs2js_channelmessage(message: ChannelMessage, manager: &AppHandle) {
         return;
     }
 
-    info!("rs2js_channelmessage: {message:?}");
+    // Progress ticks arrive once per payload chunk - roughly 35/s over BLE -
+    // and each one Debug-formats the whole struct (file list, destination,
+    // device info) before it can be filtered. That formatting cost lands on
+    // the thread draining the transfer, so keep the per-chunk case at `trace`
+    // and log only the state transitions at `info`.
+    if message.state == Some(State::ReceivingFiles) || message.state == Some(State::SendingFiles) {
+        trace!("rs2js_channelmessage: {message:?}");
+    } else {
+        info!("rs2js_channelmessage: {message:?}");
+    }
     manager.emit("rs2js_channelmessage", &message).unwrap();
 }
 
