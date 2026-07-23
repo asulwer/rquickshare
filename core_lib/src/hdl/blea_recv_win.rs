@@ -51,6 +51,75 @@ const BLE_SOCKET_CLIENT_TX_GUID: GUID =
 const BLE_SOCKET_SERVER_TX_GUID: GUID =
     GUID::from_u128(0x0000_0100_0004_1000_8000_001a11000102);
 
+/// Send a Weave ConnectionConfirm notification, retrying on non-Success delivery.
+///
+/// The first connection to a freshly advertised receiver fails intermittently
+/// and a re-send works - the long-standing "first BLE connection is flaky" bug.
+/// The receive-side signature: our ConnectionConfirm comes back delivery status
+/// `Unreachable` (1) even though the phone has subscribed (measured: the failing
+/// first connection logged delivery `[1]`, the phone's own retry a moment later
+/// logged `[0]`), and the phone drops the link about a second later having never
+/// received it.
+///
+/// The cause is context, not the link: this notification is sent from inside the
+/// GATT write handler that just received the ConnectionRequest, so the ATT layer
+/// is still completing that write when we notify. Retrying from the delivery
+/// completion callback runs *after* that transaction, which is why it gets
+/// through - and why the phone's later retry always worked.
+///
+/// The same 5 bytes are re-sent, keeping the Weave counter the phone never saw.
+/// Bounded: this recovers from a transient, it does not spin.
+fn notify_confirm(confirm_tx: GattLocalCharacteristic, confirm: [u8; 5], attempts_left: u32) {
+    let buffer = match (|| {
+        let w = DataWriter::new()?;
+        w.WriteBytes(&confirm)?;
+        w.DetachBuffer()
+    })() {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("{INNER_NAME}: could not build ConnectionConfirm buffer: {e}");
+            return;
+        }
+    };
+
+    match confirm_tx.NotifyValueAsync(&buffer) {
+        Ok(op) => {
+            let op_for_cb = op.clone();
+            let tx_for_cb = confirm_tx.clone();
+            let _ = op.SetCompleted(&AsyncOperationCompletedHandler::new(move |_, _| {
+                let mut statuses = Vec::new();
+                if let Ok(results) = op_for_cb.GetResults() {
+                    for i in 0..results.Size().unwrap_or(0) {
+                        if let Ok(r) = results.GetAt(i) {
+                            statuses.push(r.Status().map(|s| s.0).unwrap_or(-1));
+                        }
+                    }
+                }
+                let delivered = !statuses.is_empty() && statuses.iter().all(|s| *s == 0);
+                if delivered {
+                    info!(
+                        "*** {INNER_NAME}: ConnectionConfirm delivery statuses {statuses:?} \
+                         (0 = Success) ***"
+                    );
+                } else if attempts_left > 0 {
+                    warn!(
+                        "*** {INNER_NAME}: ConnectionConfirm not delivered ({statuses:?}); \
+                         retrying, {attempts_left} attempt(s) left ***"
+                    );
+                    notify_confirm(tx_for_cb.clone(), confirm, attempts_left - 1);
+                } else {
+                    warn!(
+                        "*** {INNER_NAME}: ConnectionConfirm not delivered ({statuses:?}) and \
+                         no retries left; the peer will drop the link ***"
+                    );
+                }
+                Ok(())
+            }));
+        }
+        Err(e) => warn!("{INNER_NAME}: NotifyValueAsync failed: {e}"),
+    }
+}
+
 fn adv_status_name(s: i32) -> &'static str {
     match s {
         0 => "Created",
@@ -453,6 +522,46 @@ impl BleReceiverAdvertiser {
                                     if outbound_tx.send(out).is_err() {
                                         break;
                                     }
+                                }
+
+                                // Close the multiplex service channel, the same
+                                // way the send path does - this direction was
+                                // missing it.
+                                //
+                                // The phone can finish the whole upgrade
+                                // handshake and then send nothing over the
+                                // hotspot: measured here as "nothing on the
+                                // upgraded socket within 45s", with the phone
+                                // having connected and introduced itself over
+                                // that very socket, so it is reachable and simply
+                                // not sending. Its sender waits for the BLE
+                                // service channel to close before committing to
+                                // the new medium - the mirror of the reader
+                                // behaviour that stranded PC->phone until we
+                                // closed the channel there (see blea_send.rs).
+                                //
+                                // We host the GATT server, so we close the
+                                // channel by *notifying* the DISCONNECT rather
+                                // than writing it: queue it on outbound_tx now so
+                                // it rides out in the same drain as SAFE_TO_CLOSE,
+                                // before the switch. 00 00 00 = multiplex
+                                // control; 08 02 1a 05 0a 03 <hash> = disconnect
+                                // the named service; fc 9f 5e is this session's
+                                // service hash, the one used for data framing
+                                // above.
+                                let disconnect = vec![
+                                    0x00, 0x00, 0x00, 0x08, 0x02, 0x1a, 0x05, 0x0a, 0x03, 0xfc,
+                                    0x9f, 0x5e,
+                                ];
+                                if outbound_tx.send(disconnect).is_err() {
+                                    warn!(
+                                        "{INNER_NAME}: could not queue the multiplex channel close"
+                                    );
+                                } else {
+                                    info!(
+                                        "{INNER_NAME}: queued multiplex channel close for \
+                                         [fc, 9f, 5e]"
+                                    );
                                 }
 
                                 // Then wait for it to actually reach the peer.
@@ -956,45 +1065,16 @@ impl BleReceiverAdvertiser {
                         .SubscribedClients()
                         .and_then(|c| c.Size())
                         .unwrap_or(0);
-                    let w = DataWriter::new()?;
-                    w.WriteBytes(&confirm)?;
-                    let buffer = w.DetachBuffer()?;
-                    // Do NOT block on .get() here - this runs on a WinRT event
-                    // handler thread and waiting on the async op can deadlock.
-                    // Log failures rather than `?`-ing out, which previously made
-                    // the confirm vanish with no trace.
-                    // Report delivery via a completion handler. Blocking on
-                    // .get() inside this WinRT callback is illegal (0x8000000E),
-                    // and a worker thread is out because IBuffer isn't Send - but
-                    // a completion callback costs neither.
-                    match confirm_tx.NotifyValueAsync(&buffer) {
-                        Ok(op) => {
-                            let op_for_log = op.clone();
-                            let _ = op.SetCompleted(&AsyncOperationCompletedHandler::new(
-                                move |_, _| {
-                                    let mut statuses = Vec::new();
-                                    if let Ok(results) = op_for_log.GetResults() {
-                                        for i in 0..results.Size().unwrap_or(0) {
-                                            if let Ok(r) = results.GetAt(i) {
-                                                statuses
-                                                    .push(r.Status().map(|s| s.0).unwrap_or(-1));
-                                            }
-                                        }
-                                    }
-                                    info!(
-                                        "*** {INNER_NAME}: ConnectionConfirm delivery statuses \
-                                         {statuses:?} (0 = Success) ***"
-                                    );
-                                    Ok(())
-                                },
-                            ));
-                            info!(
-                                "*** {INNER_NAME}: sent Weave ConnectionConfirm (v{version}, \
-                                 {packet_size} B, {subscribers} subscriber(s)) ***"
-                            );
-                        }
-                        Err(e) => warn!("{INNER_NAME}: NotifyValueAsync failed: {e}"),
-                    }
+                    info!(
+                        "*** {INNER_NAME}: sending Weave ConnectionConfirm (v{version}, \
+                         {packet_size} B, {subscribers} subscriber(s)) ***"
+                    );
+                    // Retries on non-Success delivery - see notify_confirm. Do
+                    // NOT block on .get() here: this runs on a WinRT write-event
+                    // handler thread, where waiting on the async op is illegal
+                    // (0x8000000E) and can deadlock. The retry is driven entirely
+                    // by the delivery-completion callback.
+                    notify_confirm(confirm_tx.clone(), confirm, 5);
                 }
                 handler_us.fetch_add(
                     t_enter.elapsed().as_micros() as u64,

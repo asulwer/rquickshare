@@ -110,10 +110,6 @@ pub struct InboundRequest<S> {
     /// stream may now move onto the upgraded socket.
     #[cfg(all(feature = "experimental", target_os = "windows"))]
     switch_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
-    /// Whether the peer advertised WIFI_LAN, i.e. it is already on a network.
-    /// Offering such a peer our soft-AP asks it to abandon that network, which
-    /// google/nearby refuses outright ("this will destroy WIFI_LAN").
-    peer_has_wifi_lan: bool,
     /// When we last answered a KeepAlive, so redundant responses can be skipped.
     /// Not transport-specific, but it matters on BLE: see the KeepAlive arm.
     last_keepalive_response: Option<std::time::Instant>,
@@ -123,6 +119,12 @@ pub struct InboundRequest<S> {
     hotspot: Option<crate::hdl::WindowsHotspot>,
     #[cfg(all(feature = "experimental", target_os = "windows"))]
     hotspot_creds: Option<crate::hdl::HotspotCredentials>,
+    /// Whether the shared upgrade listener on 0.0.0.0:8899 is already up. Both
+    /// the WIFI_LAN and WIFI_HOTSPOT offers can be sent for one transfer, and a
+    /// single listener accepts whichever interface the phone reaches us on - so
+    /// the second offer must not try to bind the port again.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    upgrade_listener_started: bool,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
@@ -150,7 +152,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
             wifi_direct: None,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
             wifi_direct_creds: None,
-            peer_has_wifi_lan: false,
             last_keepalive_response: None,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
             upgrade_tx: None,
@@ -160,6 +161,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
             hotspot: None,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
             hotspot_creds: None,
+            #[cfg(all(feature = "experimental", target_os = "windows"))]
+            upgrade_listener_started: false,
         }
     }
 
@@ -344,9 +347,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
             "ConnectionRequest: mediums (raw) = {:?}",
             connection_request.mediums
         );
-        // 5 = WIFI_LAN. Remember whether the peer already has a network, because
-        // offering it a soft-AP would mean asking it to leave one.
-        self.peer_has_wifi_lan = connection_request.mediums.contains(&5);
 
         // The phone states, unprompted, which channels it can actually use as a
         // WiFi Direct *client* - and the frequency of the AP it's sitting on.
@@ -804,11 +804,51 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
         Ok(())
     }
 
+    /// Offer the phone every upgrade path we can serve, and let it pick.
+    ///
+    /// The phone's request carries no medium (the proto has the field only on
+    /// the host's offer), and its WiFi state is not knowable at this point, so
+    /// rather than guess we present both: WIFI_LAN when we have a LAN address,
+    /// and WIFI_HOTSPOT. A single listener on 0.0.0.0:8899 accepts the phone on
+    /// whichever interface it reaches us - the LAN one if it is on our network,
+    /// the AP one if it is not. Whichever it connects on wins; the other offer
+    /// is simply never taken up.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
+    async fn offer_upgrade_paths(&mut self) {
+        let have_lan = Self::lan_ipv4().is_some();
+
+        // WIFI_LAN first: it needs no soft-AP, does not disturb the phone's own
+        // network, and is the faster path when the phone is on our LAN.
+        if have_lan {
+            if let Err(e) = self.offer_wifi_lan_upgrade().await {
+                warn!("offer_wifi_lan_upgrade failed: {e}");
+            }
+        }
+
+        // WIFI_HOTSPOT as well, for a phone that genuinely has no network. When
+        // we already have a LAN path this is the fallback the phone falls to
+        // only if it cannot reach us on the LAN.
+        if let Err(e) = self.offer_wifi_hotspot_upgrade().await {
+            warn!("offer_wifi_hotspot_upgrade failed: {e}");
+        }
+    }
+
+    #[cfg(not(all(feature = "experimental", target_os = "windows")))]
+    async fn offer_upgrade_paths(&mut self) {}
+
     /// Accept the upgraded channel on `port`, introduce it, and hand it to the
     /// bridge. Shared by the hotspot and WIFI_LAN offers - only the medium and
     /// credentials differ, never what happens once the peer connects.
     #[cfg(all(feature = "experimental", target_os = "windows"))]
     async fn ensure_upgrade_listener(&mut self, port: u16) {
+        // Idempotent: a transfer may offer both WIFI_LAN and WIFI_HOTSPOT, and
+        // one listener on 0.0.0.0 accepts the phone on whichever interface it
+        // reaches us - a second bind would only fail AddrInUse.
+        if self.upgrade_listener_started {
+            return;
+        }
+        self.upgrade_listener_started = true;
+
         let upgrade_tx = self.upgrade_tx.clone();
         tokio::spawn(async move {
             match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
@@ -1183,30 +1223,38 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
                     location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeRetry.into(),
                 ),
                 bandwidth_upgrade_retry: Some(BandwidthUpgradeRetryFrame {
-                    // Claim only what we will actually offer.
+                    // Claim exactly what we will offer, and offer both when we
+                    // can.
                     //
-                    // WIFI_HOTSPOT is the one Windows can host usefully - a
-                    // plain ssid/password soft-AP the peer joins as an ordinary
-                    // client. WIFI_DIRECT used to be claimed here as well, but
-                    // the offer for it is gated off by default (the peer's join
-                    // of a Windows group leaves its P2P state wedged at
-                    // [2]BUSY), so claiming it invited the peer to negotiate a
-                    // medium we would then never offer. That is the same
-                    // mismatch this list was corrected for once before, in the
-                    // other direction.
+                    // WIFI_HOTSPOT is the soft-AP a phone with no network joins.
+                    // WIFI_LAN is added whenever we have a LAN address, because
+                    // the phone's WiFi state is not knowable at negotiation time
+                    // - the Quick Share extension drops WiFi to send and then
+                    // reconnects, so a phone that reported no LAN in its
+                    // ConnectionRequest is frequently back on the LAN moments
+                    // later, unable to join our AP (one radio, already
+                    // associated). Advertising both lets us offer both paths and
+                    // the phone connect on whichever it can actually reach.
                     //
-                    // WIFI_LAN is not claimed either: this path is only reached
-                    // over BLE, where the peer has told us it has no WiFi LAN.
-                    // When it does have one, the LAN offer is made directly and
-                    // none of this runs.
-                    supported_medium: vec![Medium::WifiHotspot.into()],
+                    // WIFI_DIRECT stays out: its offer is gated off (a failed
+                    // join wedges the phone's P2P state at [2]BUSY), so claiming
+                    // it would invite a medium we never provide.
+                    supported_medium: if Self::lan_ipv4().is_some() {
+                        vec![Medium::WifiLan.into(), Medium::WifiHotspot.into()]
+                    } else {
+                        vec![Medium::WifiHotspot.into()]
+                    },
                     is_request: Some(false),
                 }),
                 ..Default::default()
             }),
         };
         self.encrypt_and_send(&frame).await?;
-        info!("Bandwidth upgrade: replied with supported mediums [WIFI_HOTSPOT]");
+        if Self::lan_ipv4().is_some() {
+            info!("Bandwidth upgrade: replied with supported mediums [WIFI_LAN, WIFI_HOTSPOT]");
+        } else {
+            info!("Bandwidth upgrade: replied with supported mediums [WIFI_HOTSPOT]");
+        }
         Ok(())
     }
 
@@ -1504,10 +1552,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
                             warn!("offer_wifi_direct_upgrade (on request) failed: {}", e);
                         }
                     } else {
-                        info!("Phone requested an upgrade path; offering WIFI_HOTSPOT");
-                        if let Err(e) = self.offer_wifi_hotspot_upgrade().await {
-                            warn!("offer_wifi_hotspot_upgrade (on request) failed: {}", e);
-                        }
+                        info!("Phone requested an upgrade path; offering WIFI_LAN and WIFI_HOTSPOT");
+                        self.offer_upgrade_paths().await;
                     }
                 }
             }
@@ -1946,22 +1992,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
             if let Err(e) = self.offer_wifi_direct_upgrade().await {
                 warn!("offer_wifi_direct_upgrade failed: {}", e);
             }
-        } else if self.peer_has_wifi_lan {
-            // The peer has a network, so offer to meet it there rather than
-            // asking it to join ours. A hotspot would mean leaving its own
-            // network, which google/nearby refuses ("this will destroy
-            // WIFI_LAN") - measured: such a phone completed the whole upgrade
-            // handshake and then sent nothing, hanging the transfer.
-            //
-            // Skipping the upgrade entirely was the first fix and was too blunt:
-            // a phone that has WiFi can still reach us over BLE (we advertise as
-            // a receiver on both, and it picks), and leaving that on BLE means
-            // 20 KB/s and the ~1 MB indication-timeout wall.
-            if let Err(e) = self.offer_wifi_lan_upgrade().await {
-                warn!("offer_wifi_lan_upgrade failed: {}", e);
-            }
-        } else if let Err(e) = self.offer_wifi_hotspot_upgrade().await {
-            warn!("offer_wifi_hotspot_upgrade failed: {}", e);
+        } else {
+            // Offer both paths and let the phone connect on whichever it can
+            // reach. Deciding here from the ConnectionRequest was unreliable:
+            // it reflects the phone's WiFi state at one instant, and the Quick
+            // Share extension drops WiFi to send then reconnects, so a phone
+            // that reported no LAN is often back on it moments later, unable to
+            // join our AP. Offering only the AP stranded exactly those
+            // transfers (measured: the phone sat on its home network, could not
+            // associate to our soft-AP, and the BLE link died on the 30s
+            // indication timeout). See offer_upgrade_paths.
+            self.offer_upgrade_paths().await;
         }
 
         self.update_state(
