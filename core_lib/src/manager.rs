@@ -160,12 +160,6 @@ impl TcpServer {
     pub async fn connect(&self, ctk: CancellationToken, si: SendInfo) -> Result<(), anyhow::Error> {
         debug!("{INNER_NAME}: Connecting to: {}", si.addr);
 
-        // Stop BLE scanning for the duration. A scan and a connection share the
-        // radio, and scanning through a transfer cost us ~5x throughput. Held by
-        // RAII so every exit path - success, error, cancel - releases it.
-        #[cfg(feature = "experimental")]
-        let _pause = crate::hdl::DiscoveryPause::new();
-
         #[cfg(feature = "experimental")]
         if let Some(address) = si.addr.strip_prefix("ble:") {
             // Stop advertising as a receiver for the duration, too. The phone
@@ -177,6 +171,19 @@ impl TcpServer {
 
             let address = address.to_string();
             let channel = crate::hdl::open_ble_by_address(&address).await?;
+
+            // Stop BLE scanning now that we are connected - not before. A scan
+            // and a connection share the radio, and scanning through a transfer
+            // cost ~5x throughput, so the pause is worth holding for the
+            // transfer. But acquiring it earlier deadlocked the connect itself:
+            // if the stored address had gone stale (they rotate), the refresh
+            // needs to scan to find the phone's current one, and a pause held
+            // from the top blocked that scan - so every retry failed with
+            // "could not find ... out of range" while discovery sat paused by
+            // the very send that needed it. RAII, so every exit releases it.
+            #[cfg(feature = "experimental")]
+            let _pause = crate::hdl::DiscoveryPause::new();
+
             let (stream, upgrade_tx, switch_tx, switched) = (
                 channel.stream,
                 channel.upgrade_tx,

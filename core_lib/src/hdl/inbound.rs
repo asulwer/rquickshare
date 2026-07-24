@@ -113,6 +113,13 @@ pub struct InboundRequest<S> {
     /// When we last answered a KeepAlive, so redundant responses can be skipped.
     /// Not transport-specific, but it matters on BLE: see the KeepAlive arm.
     last_keepalive_response: Option<std::time::Instant>,
+    /// When we last broadcast a receive-progress update. A per-chunk broadcast
+    /// floods the shared ChannelMessage bus - thousands of messages during a
+    /// fast transfer - overflowing its 50-slot buffer so this handler's own
+    /// subscription (watching for a UI cancel) lags and logs "channel lagged",
+    /// and risks dropping the cancel. Byte counts still advance every chunk; the
+    /// broadcast is throttled to this.
+    last_progress_broadcast: Option<std::time::Instant>,
     /// Soft-AP for the WIFI_HOTSPOT upgrade, held for the life of the transfer
     /// so tethering is torn down with the request rather than left running.
     #[cfg(all(feature = "experimental", target_os = "windows"))]
@@ -153,6 +160,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
             #[cfg(all(feature = "experimental", target_os = "windows"))]
             wifi_direct_creds: None,
             last_keepalive_response: None,
+            last_progress_broadcast: None,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
             upgrade_tx: None,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
@@ -961,6 +969,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
         self.hotspot = Some(handle);
         self.hotspot_creds = Some(creds);
 
+        // One 0.0.0.0 listener accepts the phone on whichever interface it
+        // reaches us, LAN or the AP - so when both mediums are offered and the
+        // WIFI_LAN offer already bound it, don't bind a second and trip
+        // AddrInUse (which logged a misleading "held by a previous transfer" for
+        // the *same* transfer). The AP itself is still up; only the redundant
+        // listener is skipped. Same guard as ensure_upgrade_listener.
+        if self.upgrade_listener_started {
+            return Ok(());
+        }
+        self.upgrade_listener_started = true;
+
         let upgrade_tx = self.upgrade_tx.clone();
         tokio::spawn(async move {
             match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
@@ -1455,13 +1474,27 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
                             )?;
                             file_internal.bytes_transferred += chunk_size as i64;
 
+                            // Advance the byte count every chunk, but broadcast
+                            // it at most every 100ms - see last_progress_broadcast.
+                            // 100ms is smooth for a progress bar and keeps the
+                            // shared channel from overflowing. The final state is
+                            // always broadcast on completion below, so the bar
+                            // still lands on 100%.
+                            let now = std::time::Instant::now();
+                            let due = self
+                                .last_progress_broadcast
+                                .map(|t| now.duration_since(t) >= Duration::from_millis(100))
+                                .unwrap_or(true);
+                            if due {
+                                self.last_progress_broadcast = Some(now);
+                            }
                             self.update_state(
                                 |e| {
                                     if let Some(tmd) = e.transfer_metadata.as_mut() {
                                         tmd.ack_bytes += chunk_size as u64;
                                     }
                                 },
-                                true,
+                                due,
                             )
                             .await;
                         } else if (chunk.flags() & 1) == 1 {

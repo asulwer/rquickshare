@@ -103,6 +103,11 @@ pub struct OutboundRequest<S> {
     sender: Sender<ChannelMessage>,
     receiver: Receiver<ChannelMessage>,
     payload: OutboundPayload,
+    /// When we last broadcast a send-progress update. Per-chunk broadcasts flood
+    /// the shared ChannelMessage bus and overflow its buffer, so the byte count
+    /// advances every chunk but the broadcast is throttled to this. Mirrors the
+    /// receive path.
+    last_progress_broadcast: Option<std::time::Instant>,
     /// Where the upgrade listener delivers the socket the peer connected on,
     /// and the signal that the old channel has been released. Set by the BLE
     /// send path, which is the only transport that can adopt an upgraded socket
@@ -185,6 +190,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
             sender,
             receiver,
             payload,
+            last_progress_broadcast: None,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
             upgrade_tx: None,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
@@ -1419,6 +1425,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
 						};
 
                         self.encrypt_and_send(&wrapper).await?;
+                        // Advance every chunk, broadcast at most every 100ms -
+                        // see last_progress_broadcast. Completion is broadcast
+                        // separately, so the bar still reaches 100%.
+                        let now = std::time::Instant::now();
+                        let due = self
+                            .last_progress_broadcast
+                            .map(|t| now.duration_since(t) >= std::time::Duration::from_millis(100))
+                            .unwrap_or(true);
+                        if due {
+                            self.last_progress_broadcast = Some(now);
+                        }
                         self.update_state(
                             |e| {
                                 if let Some(mu) = e.transferred_files.get_mut(&current) {
@@ -1429,7 +1446,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                                     tmd.ack_bytes += bytes_read as u64;
                                 }
                             },
-                            true,
+                            due,
                         )
                         .await;
 
