@@ -1047,6 +1047,26 @@ impl BleReceiverAdvertiser {
                     let their_max = u16::from_be_bytes([buf[5], buf[6]]);
                     let version = ver_max.min(1);
                     let packet_size = their_max.min(509);
+
+                    // A ConnectionRequest starts a fresh Weave connection, so
+                    // reset both counters here. This handler and its state live
+                    // for the advertiser's whole lifetime, not per connection -
+                    // so the second transfer of a session inherited the first's
+                    // counters. Our ConnectionConfirm then went out on a stale
+                    // outbound counter and the phone answered with a Weave Error
+                    // before any accept prompt (measured: its own log shows the
+                    // Weave socket erroring during UKEY2, ending in EOFException),
+                    // while our inbound reorder still expected the prior stream's
+                    // next counter and would have stalled the phone's data. The
+                    // phone's ConnectionRequest is its counter 0, so ours
+                    // restarts at 0 and the next inbound packet we expect is 1.
+                    confirm_counter.store(0, std::sync::atomic::Ordering::Relaxed);
+                    if let Ok(mut st) = rx_buf.lock() {
+                        st.acc.clear();
+                        st.expected = 1;
+                        st.pending = Default::default();
+                    }
+
                     // Header: bit7 = control, bits 6-4 = counter, low nibble =
                     // command (1 = ConnectionConfirm). Draws from the shared
                     // per-direction counter so the data packets that follow

@@ -23,7 +23,7 @@ use std::sync::Mutex;
 
 use windows::core::HSTRING;
 use windows::Networking::Connectivity::NetworkInformation;
-use windows::Networking::NetworkOperators::NetworkOperatorTetheringManager;
+use windows::Networking::NetworkOperators::{NetworkOperatorTetheringManager, TetheringWiFiBand};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
 /// Credentials for the started hotspot, mapped 1:1 to WifiHotspotCredentials.
@@ -83,6 +83,25 @@ impl WindowsHotspot {
                 let config = manager.GetCurrentAccessPointConfiguration()?;
                 config.SetSsid(&HSTRING::from(ssid.as_str()))?;
                 config.SetPassphrase(&HSTRING::from(passphrase.as_str()))?;
+
+                // Prefer 5 GHz. The default band is 2.4 GHz, which caps a large
+                // phone->PC transfer at roughly 4 MB/s - measured on a 667 MB
+                // file. 5 GHz is several times faster where the adapter can host
+                // it. Guard on IsBandSupported so an adapter that cannot falls
+                // back to its default rather than failing to start the AP, and
+                // treat any error from the band call as "leave it at default".
+                match config.IsBandSupported(TetheringWiFiBand::FiveGigahertz) {
+                    Ok(true) => {
+                        if let Err(e) = config.SetBand(TetheringWiFiBand::FiveGigahertz) {
+                            warn!("hotspot: could not set 5 GHz band ({e}); using default");
+                        } else {
+                            info!("hotspot: hosting on the 5 GHz band");
+                        }
+                    }
+                    Ok(false) => info!("hotspot: 5 GHz not supported by the adapter; using default"),
+                    Err(e) => warn!("hotspot: 5 GHz support query failed ({e}); using default"),
+                }
+
                 manager.ConfigureAccessPointAsync(&config)?.get()?;
 
                 manager.StartTetheringAsync()?.get()?;
