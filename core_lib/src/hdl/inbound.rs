@@ -37,7 +37,6 @@ fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> std::io::Result
 use anyhow::anyhow;
 use bytes::Bytes;
 use hmac::{Hmac, KeyInit, Mac};
-use libaes::{Cipher, AES_256_KEY_LEN};
 use p256::ecdh::diffie_hellman;
 use p256::elliptic_curve::sec1::{FromSec1Point, ToSec1Point};
 use p256::{PublicKey, Sec1Point};
@@ -120,6 +119,14 @@ pub struct InboundRequest<S> {
     /// and risks dropping the cancel. Byte counts still advance every chunk; the
     /// broadcast is throttled to this.
     last_progress_broadcast: Option<std::time::Instant>,
+    /// Receive-throughput profiling, reset every report. Splits wall-clock time
+    /// into decrypt (HMAC + AES + protobuf decode) and disk write, so a slow
+    /// transfer shows where the time actually goes rather than us guessing.
+    prof_decrypt: std::time::Duration,
+    prof_aes: std::time::Duration,
+    prof_write: std::time::Duration,
+    prof_bytes: u64,
+    prof_since: Option<std::time::Instant>,
     /// Soft-AP for the WIFI_HOTSPOT upgrade, held for the life of the transfer
     /// so tethering is torn down with the request rather than left running.
     #[cfg(all(feature = "experimental", target_os = "windows"))]
@@ -161,6 +168,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
             wifi_direct_creds: None,
             last_keepalive_response: None,
             last_progress_broadcast: None,
+            prof_decrypt: std::time::Duration::ZERO,
+            prof_aes: std::time::Duration::ZERO,
+            prof_write: std::time::Duration::ZERO,
+            prof_bytes: 0,
+            prof_since: None,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
             upgrade_tx: None,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
@@ -1286,6 +1298,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
         &mut self,
         smsg: &SecureMessage,
     ) -> Result<(), anyhow::Error> {
+        let _prof_t = std::time::Instant::now();
         let mut hmac = HmacSha256::new_from_slice(self.state.recv_hmac_key.as_ref().unwrap())?;
         hmac.update(&smsg.header_and_body);
         let computed = hmac.finalize().into_bytes();
@@ -1298,11 +1311,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
         let msg_data = header_and_body.body;
         let key = self.state.decrypt_key.as_ref().unwrap();
 
-        let mut cipher = Cipher::new_256(key[..AES_256_KEY_LEN].try_into()?);
-        cipher.set_auto_padding(true);
-        let decrypted = cipher.cbc_decrypt(header_and_body.header.iv(), &msg_data);
+        let _prof_a = std::time::Instant::now();
+        let decrypted =
+            crate::hdl::aes256_cbc_decrypt(key, header_and_body.header.iv(), &msg_data)?;
+        self.prof_aes += _prof_a.elapsed();
 
         let d2d_msg = DeviceToDeviceMessage::decode(&*decrypted)?;
+        // Everything from _prof_t is HMAC + AES + protobuf decode - the CPU cost
+        // of a frame; prof_aes isolates just the AES within it. Accumulate for
+        // the throughput report at the file write.
+        self.prof_decrypt += _prof_t.elapsed();
 
         let seq = self.get_client_seq_inc().await;
         if d2d_msg.sequence_number() != seq {
@@ -1467,12 +1485,47 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
                         }
 
                         if !chunk.body().is_empty() {
+                            let _prof_w = std::time::Instant::now();
                             write_all_at(
                                 file_internal.file.as_ref().unwrap(),
                                 chunk.body(),
                                 current_offset as u64,
                             )?;
                             file_internal.bytes_transferred += chunk_size as i64;
+
+                            // Throughput profiling. Split wall-clock into
+                            // decrypt, write, and the remainder (socket read +
+                            // duplex + protobuf dispatch + waiting on the link),
+                            // reported every 5s. Tells us whether the ~4 MB/s
+                            // ceiling is our CPU (decrypt), our disk (write), or
+                            // neither - i.e. the network/link is simply not
+                            // delivering faster.
+                            self.prof_write += _prof_w.elapsed();
+                            self.prof_bytes += chunk_size as u64;
+                            let now = std::time::Instant::now();
+                            let since = *self.prof_since.get_or_insert(now);
+                            let elapsed = now.duration_since(since);
+                            if elapsed >= Duration::from_secs(5) {
+                                let secs = elapsed.as_secs_f64();
+                                debug!(
+                                    "recv profile: {:.1} MB/s over {secs:.0}s | decrypt {:.0}ms/s \
+                                     (of which AES {:.0}ms/s), write {:.0}ms/s, rest {:.0}ms/s",
+                                    self.prof_bytes as f64 / 1_048_576.0 / secs,
+                                    self.prof_decrypt.as_millis() as f64 / secs,
+                                    self.prof_aes.as_millis() as f64 / secs,
+                                    self.prof_write.as_millis() as f64 / secs,
+                                    (elapsed.saturating_sub(self.prof_decrypt).saturating_sub(
+                                        self.prof_write
+                                    ))
+                                    .as_millis() as f64
+                                        / secs,
+                                );
+                                self.prof_decrypt = Duration::ZERO;
+                                self.prof_aes = Duration::ZERO;
+                                self.prof_write = Duration::ZERO;
+                                self.prof_bytes = 0;
+                                self.prof_since = Some(now);
+                            }
 
                             // Advance the byte count every chunk, but broadcast
                             // it at most every 100ms - see last_progress_broadcast.
@@ -2230,9 +2283,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
         let msg_data = d2d_msg.encode_to_vec();
         let iv = gen_random(16);
 
-        let mut cipher = Cipher::new_256(&key[..AES_256_KEY_LEN].try_into().unwrap());
-        cipher.set_auto_padding(true);
-        let encrypted = cipher.cbc_encrypt(&iv, &msg_data);
+        let encrypted = crate::hdl::aes256_cbc_encrypt(key, &iv, &msg_data)?;
 
         let hb = HeaderAndBody {
             body: encrypted,

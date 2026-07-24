@@ -12,7 +12,6 @@
 use std::time::Duration;
 
 use hmac::{Hmac, KeyInit, Mac};
-use libaes::{Cipher, AES_256_KEY_LEN};
 use prost::Message;
 use sha2::Sha256;
 use tokio::io::{duplex, DuplexStream};
@@ -229,9 +228,8 @@ fn kat_decrypts_a_frame_the_pixel_encrypted() {
     let smsg = SecureMessage::decode(&*hex::decode(KAT_SECURE_MESSAGE).unwrap()).unwrap();
     let hab = HeaderAndBody::decode(&*smsg.header_and_body).unwrap();
 
-    let mut cipher = Cipher::new_256(keys.client_key[..AES_256_KEY_LEN].try_into().unwrap());
-    cipher.set_auto_padding(true);
-    let decrypted = cipher.cbc_decrypt(hab.header.iv(), &hab.body);
+    let decrypted =
+        crate::hdl::aes256_cbc_decrypt(&keys.client_key, hab.header.iv(), &hab.body).unwrap();
 
     let d2d = DeviceToDeviceMessage::decode(&*decrypted).unwrap();
     assert_eq!(d2d.sequence_number(), 1);

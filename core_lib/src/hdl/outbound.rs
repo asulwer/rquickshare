@@ -7,7 +7,6 @@ use std::time::Duration;
 use anyhow::anyhow;
 use bytes::Bytes;
 use hmac::{Hmac, KeyInit, Mac};
-use libaes::{Cipher, AES_256_KEY_LEN};
 use p256::ecdh::diffie_hellman;
 use p256::elliptic_curve::sec1::{FromSec1Point, ToSec1Point};
 use p256::{PublicKey, Sec1Point};
@@ -683,9 +682,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
         let msg_data = header_and_body.body;
         let key = self.state.decrypt_key.as_ref().unwrap();
 
-        let mut cipher = Cipher::new_256(key[..AES_256_KEY_LEN].try_into()?);
-        cipher.set_auto_padding(true);
-        let decrypted = cipher.cbc_decrypt(header_and_body.header.iv(), &msg_data);
+        let decrypted =
+            crate::hdl::aes256_cbc_decrypt(key, header_and_body.header.iv(), &msg_data)?;
 
         let d2d_msg = DeviceToDeviceMessage::decode(&*decrypted)?;
 
@@ -1780,9 +1778,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
         let msg_data = d2d_msg.encode_to_vec();
         let iv = gen_random(16);
 
-        let mut cipher = Cipher::new_256(&key[..AES_256_KEY_LEN].try_into().unwrap());
-        cipher.set_auto_padding(true);
-        let encrypted = cipher.cbc_encrypt(&iv, &msg_data);
+        let encrypted = crate::hdl::aes256_cbc_encrypt(key, &iv, &msg_data)?;
 
         let hb = HeaderAndBody {
             body: encrypted,

@@ -42,6 +42,7 @@ windows = { version = "0.58", features = [
 ], optional = true }
 
 [dependencies]
+aes = "0.8"
 aes-gcm = "0.11"
 anyhow = "1.0"
 base64 = "0.22"
@@ -54,7 +55,7 @@ hex = "0.4"
 hkdf = "0.13"
 hmac = "0.13"
 hostname = "0.4"
-libaes = "0.7"
+cbc = { version = "0.1", features = ["alloc"] }
 log = "0.4"
 # The published upstream crate, not Martichou's `unsolicited` fork. That fork
 # exists to expose `register_resend` (a forced re-announcement), but it is

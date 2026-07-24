@@ -8,6 +8,9 @@ use self::info::{InternalFileInfo, TransferMetadata};
 use crate::securegcm::ukey2_client_init::CipherCommitment;
 use crate::utils::RemoteDeviceInfo;
 
+mod crypto;
+pub use crypto::{aes256_cbc_decrypt, aes256_cbc_encrypt};
+
 #[cfg(feature = "experimental")]
 mod ble;
 #[cfg(feature = "experimental")]
