@@ -1150,6 +1150,9 @@ impl BleReceiverAdvertiser {
             let mut tx_queue: std::collections::VecDeque<Vec<u8>> =
                 std::collections::VecDeque::new();
             let in_flight = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            // When the outstanding indication went out, so the gate can stop
+            // waiting on a confirmation the phone is never going to send.
+            let mut in_flight_since: Option<std::time::Instant> = None;
 
             let mut last_status: i32 = -1;
             let mut adv_paused = false;
@@ -1185,9 +1188,38 @@ impl BleReceiverAdvertiser {
                     tx_drained.notify_waiters();
                 }
 
+                // Stop waiting on a confirmation the phone has stopped sending.
+                //
+                // Once the phone joins the hotspot it quits confirming our
+                // indications, so the gate would otherwise sit on the
+                // outstanding one for the full 30s ATT timeout - and the
+                // switch-critical multiplex channel-close, queued behind it,
+                // would reach the phone far too late to matter (measured: the
+                // transfer then dies at "nothing on the upgraded socket within
+                // 45s"). This is a safety bound on the wait, not a fallback:
+                // normal confirmations land in well under a second, so it only
+                // trips on a genuine stall, and it proceeds to the next packet
+                // through the same ordered, reliable, one-at-a-time path rather
+                // than firing anything out of band. The stalled indication's own
+                // 30s ATT timeout still runs, harmlessly, since BLE is being
+                // abandoned for the upgraded socket anyway.
+                if in_flight.load(std::sync::atomic::Ordering::Relaxed) {
+                    if let Some(since) = in_flight_since {
+                        if since.elapsed() >= std::time::Duration::from_secs(5) {
+                            warn!(
+                                "{INNER_NAME}: indication unconfirmed after 5s; proceeding to the \
+                                 next rather than stalling the switch"
+                            );
+                            in_flight.store(false, std::sync::atomic::Ordering::Relaxed);
+                            in_flight_since = None;
+                        }
+                    }
+                }
+
                 // At most one indication outstanding. The completion handler
                 // clears the flag, so the next goes out only once the phone has
-                // confirmed the previous one.
+                // confirmed the previous one - or once the bound above gives up
+                // on it.
                 if !in_flight.load(std::sync::atomic::Ordering::Relaxed) {
                     if let Some(pkt) = tx_queue.pop_front() {
                         let ctr = (pkt[0] >> 4) & 0x07;
@@ -1244,6 +1276,11 @@ impl BleReceiverAdvertiser {
                         };
                         if let Err(e) = send() {
                             warn!("{INNER_NAME}: weave send failed: {e}");
+                        }
+                        // Record when this one went out, for the stall bound
+                        // above. Only if the send actually took the slot.
+                        if in_flight.load(std::sync::atomic::Ordering::Relaxed) {
+                            in_flight_since = Some(std::time::Instant::now());
                         }
                     }
                 }
