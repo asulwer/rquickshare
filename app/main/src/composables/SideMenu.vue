@@ -27,8 +27,8 @@ const pluralize = (n: number, s: string) => n === 1 ? s : `${s}s`;
 			<span v-else>Temporarily visible</span>
 
 			<svg
-				xmlns="http://www.w3.org/2000/svg" height="24" viewBox="0 -960 960 960" width="24"
-				:class="{'rotate-180': props.vm.visibility === 'Invisible'}">
+				xmlns="http://www.w3.org/2000/svg" fill="currentColor" height="24" viewBox="0 -960 960 960"
+				width="24" :class="{'rotate-180': props.vm.visibility === 'Invisible'}">
 				<path d="M504-480 320-664l56-56 240 240-240 240-56-56 184-184Z" />
 			</svg>
 		</h4>
@@ -58,8 +58,8 @@ const pluralize = (n: number, s: string) => n === 1 ? s : `${s}s`;
 			</p>
 			<div class="bg-white dark:bg-neutral-700 w-32 h-32 rounded-2xl mb-2 flex justify-center items-center">
 				<svg
-					xmlns="http://www.w3.org/2000/svg" height="24" viewBox="0 -960 960 960" width="24"
-					class="w-8 h-8">
+					xmlns="http://www.w3.org/2000/svg" fill="currentColor" height="24" viewBox="0 -960 960 960"
+					width="24" class="w-8 h-8">
 					<!-- eslint-disable-next-line -->
                     <path d="M240-80q-33 0-56.5-23.5T160-160v-640q0-33 23.5-56.5T240-880h320l240 240v480q0 33-23.5 56.5T720-80H240Zm280-520v-200H240v640h480v-440H520ZM240-800v200-200 640-640Z" />
 				</svg>

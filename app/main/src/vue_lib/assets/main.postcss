@@ -222,6 +222,12 @@ body,
 }
 
 /* Automatic dark theme: follows the OS via prefers-color-scheme (no toggle). */
+/* Lets the engine draw native widgets - select popups, scrollbars, checkboxes -
+   in the OS theme rather than always light. */
+html {
+    color-scheme: light dark;
+}
+
 html,
 body,
 #app {
