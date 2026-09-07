@@ -267,6 +267,9 @@ export default {
 			downloadPath: ref<string | undefined>(),
 
 			hostname: ref<string>(),
+			// The override the user typed, and the hostname we fall back to.
+			deviceNameOverride: ref<string | undefined>(undefined),
+			hostnameDefault: ref<string | undefined>(undefined),
 
 			settingsOpen: ref<boolean>(false),
 
@@ -277,7 +280,7 @@ export default {
 	mounted: function () {
 		nextTick(async () => {
 			try {
-				this.hostname = await invoke('get_hostname');
+				await this.getDeviceName(this);
 				this.version = await getVersion();
 
 				await this.getVisibility(this);

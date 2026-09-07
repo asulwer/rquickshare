@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { loggingLevels, utils } from '../vue_lib';
-import { PropType } from 'vue';
+import { PropType, ref, watch } from 'vue';
 import { TauriVM } from '../vue_lib/helper/ParamsHelper';
 
 const props = defineProps({
@@ -11,6 +11,29 @@ const props = defineProps({
 });
 
 const emit = defineEmits(['close']);
+
+// Edited locally and committed on blur or Enter, rather than on every
+// keystroke: each commit re-announces over mDNS, and doing that per character
+// would spam the network and make peers flicker through half-typed names.
+const nameDraft = ref(props.vm.deviceNameOverride ?? '');
+
+watch(() => props.vm.deviceNameOverride, (v) => {
+	nameDraft.value = v ?? '';
+});
+
+async function commitDeviceName() {
+	const next = nameDraft.value.trim();
+	if (next === (props.vm.deviceNameOverride ?? '')) {
+		return;
+	}
+
+	await utils.setDeviceName(props.vm, next);
+}
+
+async function resetDeviceName() {
+	nameDraft.value = '';
+	await utils.setDeviceName(props.vm, undefined);
+}
 
 function openDownloadPicker() {
 	props.vm.dialogOpen({
@@ -39,6 +62,26 @@ function openDownloadPicker() {
 				</div>
 			</div>
 			<div class="py-4 flex flex-col">
+				<div class="form-control hover:bg-gray-500 hover:bg-opacity-10 rounded-xl p-3">
+					<label class="flex flex-col items-start gap-1">
+						<span class="flex flex-row justify-between items-center w-full">
+							<span class="label-text">Device name</span>
+							<span
+								v-if="vm.deviceNameOverride" class="text-xs cursor-pointer underline opacity-70"
+								@click="resetDeviceName()">
+								Reset
+							</span>
+						</span>
+						<input
+							v-model="nameDraft" type="text" :placeholder="vm.hostnameDefault ?? 'This device'"
+							maxlength="64"
+							class="w-full rounded-xl bg-white dark:bg-neutral-700 border border-gray-500 border-opacity-30 px-2 py-1 text-sm focus:outline-none"
+							@blur="commitDeviceName()" @keyup.enter="commitDeviceName()">
+						<span class="text-xs opacity-70">
+							What nearby devices show. Empty follows the hostname.
+						</span>
+					</label>
+				</div>
 				<div class="form-control hover:bg-gray-500 hover:bg-opacity-10 rounded-xl p-3">
 					<label class="cursor-pointer flex flex-row justify-between items-center" @click="utils.setAutoStart(vm, !vm.autostart)">
 						<span class="label-text">Start on boot</span>

@@ -16,7 +16,7 @@ use sha2::Sha256;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use ts_rs::TS;
 
-use crate::CUSTOM_DOWNLOAD;
+use crate::{CUSTOM_DEVICE_NAME, CUSTOM_DOWNLOAD};
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Serialize, TS)]
 #[ts(export)]
@@ -83,6 +83,51 @@ pub fn gen_mdns_name(endpoint_id: [u8; 4]) -> String {
     URL_SAFE_NO_PAD.encode(&name_b)
 }
 
+/// Longest device name we can advertise, in bytes.
+///
+/// Both the mDNS endpoint-info record and the connection-request
+/// `endpoint_info` prefix the name with a single length byte, so there is no
+/// way to describe anything longer.
+pub const MAX_DEVICE_NAME_LEN: usize = 255;
+
+/// Truncate to [`MAX_DEVICE_NAME_LEN`] bytes on a char boundary, so a name that
+/// is too long stays valid UTF-8 instead of being cut mid-codepoint.
+pub fn truncate_device_name(name: &str) -> String {
+    if name.len() <= MAX_DEVICE_NAME_LEN {
+        return name.to_owned();
+    }
+
+    let mut end = MAX_DEVICE_NAME_LEN;
+    while end > 0 && !name.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    name[..end].to_owned()
+}
+
+/// The name to advertise to peers: the user's chosen name if they set one,
+/// otherwise the machine hostname.
+///
+/// This is the *display* name only. It deliberately does not feed the mDNS host
+/// record or the WiFi Direct device name, both of which have to keep matching
+/// what the OS actually answers to - see those call sites.
+pub fn device_name() -> String {
+    let custom = match CUSTOM_DEVICE_NAME.read() {
+        Ok(guard) => guard.clone(),
+        // A poisoned lock only means another thread panicked while setting the
+        // name; falling back to the hostname beats propagating that.
+        Err(e) => e.into_inner().clone(),
+    };
+
+    let name = custom.unwrap_or_else(|| {
+        ::hostname::get()
+            .map(|h| h.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| String::from("rquickshare"))
+    });
+
+    truncate_device_name(&name)
+}
+
 pub fn gen_mdns_endpoint_info(device_type: u8, device_name: &str) -> String {
     let mut record = Vec::new();
 
@@ -93,6 +138,7 @@ pub fn gen_mdns_endpoint_info(device_type: u8, device_name: &str) -> String {
     let unknown_bytes = rand::rng().random::<[u8; 16]>();
     record.extend_from_slice(&unknown_bytes);
 
+    let device_name = truncate_device_name(device_name);
     let device_name = device_name.as_bytes();
     let length = device_name.len() as u8;
     record.push(length);
@@ -349,6 +395,84 @@ mod tests {
 
         assert_eq!(record.device_name.as_deref(), Some(device_name));
         assert_eq!(record.device_type, device_type);
+    }
+
+    /// Renaming has to reach the advertised record, not just the global.
+    ///
+    /// Single test rather than several, because `CUSTOM_DEVICE_NAME` is process
+    /// global and cargo runs tests in parallel; the other tests here pass names
+    /// explicitly and never read it, so this one owns it for its duration.
+    #[test]
+    fn test_device_name_override_reaches_the_endpoint_record() {
+        fn advertised_name() -> Option<String> {
+            let info = gen_mdns_endpoint_info(DeviceType::Laptop as u8, &device_name());
+            parse_endpoint_info(&info).unwrap().device_name
+        }
+
+        let hostname = ::hostname::get()
+            .map(|h| h.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| String::from("rquickshare"));
+
+        // No override: we advertise the hostname.
+        assert_eq!(
+            advertised_name().as_deref(),
+            Some(&*truncate_device_name(&hostname))
+        );
+
+        // With one: we advertise that instead.
+        *CUSTOM_DEVICE_NAME.write().unwrap() = Some(String::from("Aaron's Desk"));
+        assert_eq!(device_name(), "Aaron's Desk");
+        assert_eq!(advertised_name().as_deref(), Some("Aaron's Desk"));
+
+        // Clearing it falls back to the hostname again.
+        *CUSTOM_DEVICE_NAME.write().unwrap() = None;
+        assert_eq!(
+            advertised_name().as_deref(),
+            Some(&*truncate_device_name(&hostname))
+        );
+    }
+
+    #[test]
+    fn test_truncate_device_name_leaves_short_names_alone() {
+        assert_eq!(truncate_device_name("Aaron's Laptop"), "Aaron's Laptop");
+        assert_eq!(truncate_device_name(""), "");
+    }
+
+    #[test]
+    fn test_truncate_device_name_clamps_to_the_length_byte() {
+        let long = "a".repeat(MAX_DEVICE_NAME_LEN + 50);
+        let got = truncate_device_name(&long);
+
+        assert_eq!(got.len(), MAX_DEVICE_NAME_LEN);
+        // The record prefixes the name with a single byte, so the clamped
+        // length has to survive the cast that writes it.
+        assert_eq!(got.len() as u8 as usize, MAX_DEVICE_NAME_LEN);
+    }
+
+    #[test]
+    fn test_truncate_device_name_cuts_on_a_char_boundary() {
+        // Each 'é' is two bytes, so a naive cut at 255 would split the 128th
+        // one and leave invalid UTF-8.
+        let long = "é".repeat(200);
+        let got = truncate_device_name(&long);
+
+        assert!(got.len() <= MAX_DEVICE_NAME_LEN);
+        assert!(got.chars().all(|c| c == 'é'));
+        // 255 is odd, so the last whole char has to land at 254.
+        assert_eq!(got.len(), MAX_DEVICE_NAME_LEN - 1);
+    }
+
+    /// An over-long name must not wrap the length byte and desync the record.
+    #[test]
+    fn test_endpoint_info_survives_an_over_long_name() {
+        let long = "n".repeat(MAX_DEVICE_NAME_LEN + 10);
+        let info = gen_mdns_endpoint_info(DeviceType::Laptop as u8, &long);
+        let record = parse_endpoint_info(&info).unwrap();
+
+        assert_eq!(
+            record.device_name.as_deref(),
+            Some(&*"n".repeat(MAX_DEVICE_NAME_LEN))
+        );
     }
 
     #[test]

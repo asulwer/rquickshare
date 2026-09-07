@@ -29,6 +29,11 @@ export interface TauriVM {
     visibility: Visibility;
     downloadPath: string | undefined;
     hostname: string | undefined;
+    // The user's chosen name, or undefined when following the hostname. Kept
+    // apart from `hostname` (the effective advertised name) so the settings
+    // field can show the hostname as a placeholder rather than as typed text.
+    deviceNameOverride: string | undefined;
+    hostnameDefault: string | undefined;
     settingsOpen: boolean;
     new_version: string | null;
     enable: () => Promise<void>;

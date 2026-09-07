@@ -205,6 +205,24 @@ async function setDownloadPath(vm: TauriVM, dest: string) {
 	vm.downloadPath = dest;
 }
 
+// Renaming is persisted by the Rust command, not here: the name is trimmed and
+// clamped to the 255 bytes the wire format allows, and doing that in one place
+// keeps the stored, advertised and displayed names in step. The command hands
+// back the effective name, which is what the header shows.
+async function setDeviceName(vm: TauriVM, name: string | undefined) {
+	const trimmed = name?.trim();
+	const override = trimmed ? trimmed : undefined;
+
+	vm.hostname = await vm.invoke('change_device_name', { name: override ?? null }) as string;
+	vm.deviceNameOverride = override;
+}
+
+async function getDeviceName(vm: TauriVM) {
+	vm.hostname = await vm.invoke('get_advertised_name') as string;
+	vm.deviceNameOverride = await vm.invoke('get_device_name_override') as string | undefined ?? undefined;
+	vm.hostnameDefault = await vm.invoke('get_hostname') as string;
+}
+
 async function getDownloadPath(vm: TauriVM) {
 	vm.downloadPath = await vm.store.get(downloadPathKey) ?? undefined;
 }
@@ -247,6 +265,8 @@ export const utils = {
 	getProgress,
 	setDownloadPath,
 	getDownloadPath,
+	setDeviceName,
+	getDeviceName,
 	getLatestVersion,
 	setStartMinimized,
 	getStartMinimized,

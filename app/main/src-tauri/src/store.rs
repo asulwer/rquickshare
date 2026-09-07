@@ -83,6 +83,34 @@ pub fn get_logging_level(app_handle: &AppHandle) -> Option<String> {
         .and_then(|json| json.as_str().map(String::from))
 }
 
+/// The user's chosen device name, or `None` to advertise the hostname.
+///
+/// Deliberately not seeded in `init_default`: an absent key means "follow the
+/// hostname", so a machine renamed at the OS level keeps advertising correctly
+/// instead of being pinned to whatever it was called at first launch.
+pub fn get_device_name(app_handle: &AppHandle) -> Option<String> {
+    let store = _get_store(app_handle);
+
+    store
+        .get("device_name")
+        .and_then(|json| json.as_str().map(String::from))
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+}
+
+pub fn set_device_name(app_handle: &AppHandle, name: Option<String>) {
+    let store = _get_store(app_handle);
+
+    match name {
+        Some(name) => store.set("device_name", name),
+        // Removing the key restores the hostname fallback rather than storing
+        // the hostname as if the user had picked it.
+        None => {
+            store.delete("device_name");
+        }
+    }
+}
+
 pub fn get_startminimized(app_handle: &AppHandle) -> bool {
     let store = _get_store(app_handle);
 
