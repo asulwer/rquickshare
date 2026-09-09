@@ -159,11 +159,18 @@ function removeRequest(vm: TauriVM, id: string) {
 	}
 }
 
+// Throws rather than returning quietly: both of these are reachable by clicking
+// a device card, and a click that does nothing at all reads as the app being
+// broken. The caller turns the message into a toast.
 async function sendInfo(vm: TauriVM, eid: string) {
-	if (vm.outboundPayload === undefined) return;
+	if (vm.outboundPayload === undefined) {
+		throw new Error("Pick a file or paste some text first");
+	}
 
 	const ei = vm.endpointsInfo.find((el) => el.id === eid);
-	if (!ei || !ei.ip || !ei.port) return;
+	if (!ei || !ei.ip || !ei.port) {
+		throw new Error("That device just went away - wait for it to show up again");
+	}
 
 	const msg: SendInfo = {
 		id: ei.id,
