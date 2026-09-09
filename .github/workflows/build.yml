@@ -1,11 +1,12 @@
-name: Build-(Core & Tauri)
+# Proves the app still bundles on every supported OS. Correctness lives in
+# check.yml, so nothing here gates on tests and nothing gates on anything else.
+name: Build
 
 on:
   push:
     branches: [ "master" ]
   pull_request:
 
-# cancel ongoing jobs:
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -14,95 +15,57 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build_core:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-          - os: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-directories: "${{ github.workspace }}/core_lib/target"
-      - uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Install dependencies
-        if: contains(matrix.os, 'macos') == false
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev
-      - run: |
-          cd ./core_lib
-          cargo test
-          cargo build
-
   build_tauri:
+    name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    needs: build_core
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
-            name: main
-            target_path: app/main
-            dependencies: |
-              sudo apt-get install -y libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libwebkit2gtk-4.1-dev
-            cache_directory: app/main/src-tauri/target
           - os: macos-latest
-            name: main
-            target_path: app/main
-            cache_directory: app/main/src-tauri/target
           - os: macos-13
-            name: main
-            target_path: app/main
-            cache_directory: app/main/src-tauri/target
+    env:
+      TARGET_PATH: app/main
+      BUNDLE_NAME: main
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
         with:
-          version: 8
+          package_json_file: app/main/package.json
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: pnpm
+          cache-dependency-path: app/main/pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        with:
-          cache-directories: "${{ github.workspace }}/${{ matrix.cache_directory }}"
       - uses: arduino/setup-protoc@v3
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install Linux dependencies for U
-        if: contains(matrix.os, 'macos') == false
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
-      - name: Install Linux dependencies
-        if: contains(matrix.os, 'macos') == false
-        run: ${{ matrix.dependencies }}
+      - uses: ./.github/actions/linux-deps
+        if: runner.os == 'Linux'
 
       - name: GLIBC version
-        if: contains(matrix.os, 'macos') == false
-        run: |
-          GLIBC_VER=$(ldd --version | head -n1 | awk '{print $NF}')
-          echo "GLIBC version: ${GLIBC_VER}"
+        if: runner.os == 'Linux'
+        run: ldd --version | head -n1
 
       - name: Build Vite + Tauri
         run: |
-          rm -rf ${{ github.workspace }}/${{ matrix.target_path }}/src-tauri/target/debug/bundle/
-          cd ./${{ matrix.target_path }}
-          pnpm install
+          rm -rf "${TARGET_PATH}/src-tauri/target/debug/bundle/"
+          cd "./${TARGET_PATH}"
+          pnpm install --frozen-lockfile
           pnpm build:debug
-          cd ${{ github.workspace }}
-          ./rename_build.sh ${{ github.workspace }}/${{ matrix.target_path }}/src-tauri/target/debug/bundle/ ${{ matrix.name }}
+          cd "${GITHUB_WORKSPACE}"
+          # Third argument marks the bundle as a debug build in its filename;
+          # without it debug and release artifacts are named identically.
+          ./rename_build.sh "${TARGET_PATH}/src-tauri/target/debug/bundle/" "${BUNDLE_NAME}" debug
 
       - name: Upload result
         uses: actions/upload-artifact@v4
         with:
           name: artifact-debug-rquickshare-${{ matrix.os }}
-          path: |
-            ${{ github.workspace }}/${{ matrix.target_path }}/src-tauri/target/debug/bundle/*/r-quick-share-${{ matrix.name }}*
+          # Debug bundles are large and only useful while the PR is open.
+          retention-days: 7
+          path: ${{ env.TARGET_PATH }}/src-tauri/target/debug/bundle/*/r-quick-share-${{ env.BUNDLE_NAME }}*
