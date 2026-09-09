@@ -1,5 +1,4 @@
 target/
-Cargo.lock
 *.snap
 gen
 node_modules
