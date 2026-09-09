@@ -8,33 +8,18 @@
 	"extra-files": [
 		{
 			"type": "toml",
-			"path": "core_lib/Cargo.toml",
-			"jsonpath": "package.version"
+			"path": "Cargo.toml",
+			"jsonpath": "$.workspace.package.version"
 		},
 		{
 			"type": "toml",
-			"path": "core_lib/Cargo.lock",
+			"path": "Cargo.lock",
 			"jsonpath": "$.package[?(@.name.value == 'rqs_lib')].version"
 		},
 		{
 			"type": "toml",
-			"path": "app/main/src-tauri/Cargo.toml",
-			"jsonpath": "package.version"
-		},
-		{
-			"type": "toml",
-			"path": "app/main/src-tauri/Cargo.lock",
-			"jsonpath": "$.package[?(@.name.value == 'rqs_lib')].version"
-		},
-		{
-			"type": "toml",
-			"path": "app/main/src-tauri/Cargo.lock",
+			"path": "Cargo.lock",
 			"jsonpath": "$.package[?(@.name.value == 'rquickshare')].version"
-		},
-		{
-			"type": "yaml",
-			"path": "snap/snapcraft.yaml",
-			"jsonpath": "$.version"
 		}
 	],
 	"$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json"
