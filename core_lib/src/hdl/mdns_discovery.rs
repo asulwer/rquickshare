@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 
@@ -76,6 +76,14 @@ impl MDnsDiscovery {
         // Map with fullname as key and EndpointInfo as value
         let mut cache: HashMap<String, EndpointInfo> = HashMap::new();
 
+        // Probing a peer's addresses takes up to `CONNECT_PROBE_TIMEOUT` each and
+        // used to happen inline, so one unreachable peer held up the resolve of
+        // every other peer behind it. Probes now run in their own tasks and report
+        // back here; `probing` keeps a peer from being probed twice at once, since
+        // mDNS re-resolves the same service repeatedly.
+        let (probe_tx, mut probe_rx) = mpsc::channel::<(String, Option<EndpointInfo>)>(32);
+        let mut probing: HashSet<String> = HashSet::new();
+
         loop {
             tokio::select! {
                 _ = ctk.cancelled() => {
@@ -144,50 +152,18 @@ impl MDnsDiscovery {
 
                                     let fullname = info.get_fullname().to_string();
 
-                                    // Try each candidate in order; the first address that
-                                    // accepts a connection wins.
-                                    for ip in candidates {
-                                        let addr = SocketAddr::new(ip, port);
-                                        match tokio::time::timeout(
-                                            CONNECT_PROBE_TIMEOUT,
-                                            TcpStream::connect(addr),
-                                        )
-                                        .await
-                                        {
-                                            Ok(Ok(_)) => {}
-                                            _ => {
-                                                trace!("ServiceResolved: {addr} unreachable, trying next candidate");
-                                                continue;
-                                            }
-                                        }
-
-                                        // The frontend builds its target as `ip + ":" + port`,
-                                        // so an IPv6 literal has to carry its brackets.
-                                        let ip_str = match ip {
-                                            IpAddr::V6(v6) => format!("[{v6}]"),
-                                            IpAddr::V4(v4) => v4.to_string(),
-                                        };
-
-                                        let ei = EndpointInfo {
-                                            fullname: fullname.clone(),
-                                            id: addr.to_string(),
-                                            name: Some(dn.clone()),
-                                            ip: Some(ip_str),
-                                            port: Some(port.to_string()),
-                                            rtype: Some(dt.clone()),
-                                            present: Some(true),
-                                            qr_match: Some(qr_match),
-                                        };
-                                        // Let BLE discovery know this peer is
-                                        // reachable over the network, so it
-                                        // doesn't list the same phone twice.
-                                        #[cfg(feature = "experimental")]
-                                        crate::hdl::note_lan_peer(&dn);
-                                        info!("ServiceResolved: Resolved a new service: {:?}", ei);
-                                        cache.insert(fullname.clone(), ei.clone());
-                                        let _ = self.sender.send(ei);
-                                        break;
+                                    if cache.contains_key(&fullname) || !probing.insert(fullname.clone()) {
+                                        continue;
                                     }
+
+                                    let tx = probe_tx.clone();
+                                    tokio::spawn(async move {
+                                        let ei = Self::probe_candidates(
+                                            &fullname, candidates, port, &dn, &dt, qr_match,
+                                        )
+                                        .await;
+                                        let _ = tx.send((fullname, ei)).await;
+                                    });
                                 }
                                 ServiceEvent::ServiceRemoved(_, fullname) => {
                                     trace!("ServiceRemoved: checking if should remove {}", fullname);
@@ -219,6 +195,28 @@ impl MDnsDiscovery {
                         }
                     }
                 }
+                Some((fullname, ei)) = probe_rx.recv() => {
+                    probing.remove(&fullname);
+
+                    // A peer none of whose addresses answered isn't cached, so the
+                    // next resolve for it is probed again - it may just have been
+                    // asleep.
+                    let Some(ei) = ei else {
+                        trace!("MDnsDiscovery: no reachable address for {fullname}");
+                        continue;
+                    };
+
+                    // Let BLE discovery know this peer is reachable over the
+                    // network, so it doesn't list the same phone twice.
+                    #[cfg(feature = "experimental")]
+                    if let Some(name) = &ei.name {
+                        crate::hdl::note_lan_peer(name);
+                    }
+
+                    info!("ServiceResolved: Resolved a new service: {:?}", ei);
+                    cache.insert(fullname, ei.clone());
+                    let _ = self.sender.send(ei);
+                }
             }
         }
 
@@ -234,5 +232,51 @@ impl MDnsDiscovery {
         }
 
         Ok(())
+    }
+
+    /// Return the first of `candidates` that accepts a connection, as the
+    /// `EndpointInfo` the front end can send to, or `None` if none of them does.
+    ///
+    /// Always run from its own task: with several candidates this can take a few
+    /// times `CONNECT_PROBE_TIMEOUT`, and on the discovery loop that stalled every
+    /// other peer waiting to be resolved.
+    async fn probe_candidates(
+        fullname: &str,
+        candidates: Vec<IpAddr>,
+        port: u16,
+        device_name: &str,
+        device_type: &DeviceType,
+        qr_match: bool,
+    ) -> Option<EndpointInfo> {
+        for ip in candidates {
+            let addr = SocketAddr::new(ip, port);
+            match tokio::time::timeout(CONNECT_PROBE_TIMEOUT, TcpStream::connect(addr)).await {
+                Ok(Ok(_)) => {}
+                _ => {
+                    trace!("ServiceResolved: {addr} unreachable, trying next candidate");
+                    continue;
+                }
+            }
+
+            // The frontend builds its target as `ip + ":" + port`, so an IPv6
+            // literal has to carry its brackets.
+            let ip_str = match ip {
+                IpAddr::V6(v6) => format!("[{v6}]"),
+                IpAddr::V4(v4) => v4.to_string(),
+            };
+
+            return Some(EndpointInfo {
+                fullname: fullname.to_string(),
+                id: addr.to_string(),
+                name: Some(device_name.to_string()),
+                ip: Some(ip_str),
+                port: Some(port.to_string()),
+                rtype: Some(device_type.clone()),
+                present: Some(true),
+                qr_match: Some(qr_match),
+            });
+        }
+
+        None
     }
 }
