@@ -47,7 +47,7 @@
 								<div v-if="responding.has(item.id)" class="flex flex-row items-center gap-2 px-3 py-2 opacity-70">
 									<span
 										class="w-4 h-4 rounded-full border-2 border-current border-t-transparent animate-spin"
-										aria-hidden="true"></span>
+										aria-hidden="true" />
 									<p class="text-sm">
 										{{ responding.get(item.id) === 'AcceptTransfer' ? 'Accepting…' : 'Declining…' }}
 									</p>
@@ -238,13 +238,13 @@ export default {
 			endpointsInfo: ref<EndpointInfo[]>([]),
 			toDelete: ref<ToDelete[]>([]),
 			outboundPayload: ref<OutboundPayload | undefined>(),
-				// SVG QR code returned by start_discovery. Scanning it makes a
-				// phone advertise itself to us even when it isn't set to
-				// "Everyone" visibility.
-				qrSvg: ref<string | undefined>(undefined),
-				// Guards against firing a second transfer: a resolved service is
-				// re-announced repeatedly.
-				qrAutoSent: ref<boolean>(false),
+			// SVG QR code returned by start_discovery. Scanning it makes a
+			// phone advertise itself to us even when it isn't set to
+			// "Everyone" visibility.
+			qrSvg: ref<string | undefined>(undefined),
+			// Guards against firing a second transfer: a resolved service is
+			// re-announced repeatedly.
+			qrAutoSent: ref<boolean>(false),
 
 			// Transfer id -> the action already sent for it. Guards against
 			// double-clicking Accept, which would otherwise run the whole
@@ -277,29 +277,29 @@ export default {
 	mounted: function () {
 		nextTick(async () => {
 			try {
-					this.hostname = await invoke('get_hostname');
-			this.version = await getVersion();
+				this.hostname = await invoke('get_hostname');
+				this.version = await getVersion();
 
-			await this.getVisibility(this);
+				await this.getVisibility(this);
 
-			try {
-				if (!await this.store.has(autostartKey)) {
-					await this.setAutoStart(this, true);
-				} else {
-					await this.applyAutoStart(this);
+				try {
+					if (!await this.store.has(autostartKey)) {
+						await this.setAutoStart(this, true);
+					} else {
+						await this.applyAutoStart(this);
+					}
+				} catch (autostartErr) {
+					console.warn('[rqs] autostart unavailable (expected under `tauri dev`):', autostartErr);
 				}
-			} catch (autostartErr) {
-				console.warn('[rqs] autostart unavailable (expected under `tauri dev`):', autostartErr);
+
+				await this.getLoggingLevel(this);
+				await this.getRealclose(this);
+				await this.getStartMinimized(this);
+				await this.getClipboardAutosync(this);
+				await this.getDownloadPath(this);
+			} catch (e) {
+				console.error('[rqs] startup settings init failed (continuing to register listeners):', e);
 			}
-
-			await this.getLoggingLevel(this);
-			await this.getRealclose(this);
-			await this.getStartMinimized(this);
-			await this.getClipboardAutosync(this);
-			await this.getDownloadPath(this);
-				} catch (e) {
-					console.error('[rqs] startup settings init failed (continuing to register listeners):', e);
-				}
 
 			// Check permission for notification
 			let permissionGranted = await isPermissionGranted();
@@ -311,7 +311,7 @@ export default {
 			this.unlisten.push(
 				await listen('rs2js_channelmessage', async (event) => {
 					const cm = event.payload as ChannelMessage;
-						const idx = this.requests.findIndex((el) => el.id === cm.id);
+					const idx = this.requests.findIndex((el) => el.id === cm.id);
 
 					// The card has moved on (or died), so let the buttons work again
 					// if this id ever comes back for another transfer.
