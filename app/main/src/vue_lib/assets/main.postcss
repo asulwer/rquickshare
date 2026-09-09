@@ -30,7 +30,12 @@ body,
     position: relative;
     display: inline-block;
     width: 48px;
-    height: 48px
+    height: 48px;
+    /* It's a flex item in a column that can overflow. Without this it shrinks
+       below its own height, and the circles - absolutely positioned at a fixed
+       top, then scaled 3x by the pulse - escape the box and animate over
+       whatever is underneath (the QR card). */
+    flex-shrink: 0
 }
 
 .status-indicator .circle {
@@ -155,8 +160,19 @@ body,
     }
 }
 
+/* The press feedback lives here rather than at every call site: a click that
+   moves nothing reads as a click that didn't land. */
 .btn {
-	@apply h-12 min-h-12 cursor-pointer rounded-xl font-medium px-4 inline-flex justify-center items-center gap-2 hover:bg-gray-500 hover:bg-opacity-10
+	@apply h-12 min-h-12 cursor-pointer select-none rounded-xl font-medium px-4 inline-flex justify-center items-center gap-2
+		transition duration-150 ease-in-out hover:bg-gray-500 hover:bg-opacity-10
+		active:scale-95 active:bg-gray-500 active:bg-opacity-20
+}
+
+/* For clickable surfaces too big to shrink by 5% without looking like a glitch -
+   device rows, settings rows. Deliberately no colour of its own: these sit on
+   backgrounds of their own and set their own hover tint. */
+.pressable {
+	@apply cursor-pointer select-none transition duration-150 ease-in-out active:scale-[0.99]
 }
 
 .checkbox {

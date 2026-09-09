@@ -7,6 +7,12 @@ defineProps({
 	item: {
 		type: Object as PropType<DisplayedItem>,
 		required: true
+	},
+	// Set while we've asked the backend to send to this device and it hasn't
+	// reported anything back yet.
+	busy: {
+		type: Boolean,
+		default: false
 	}
 });
 </script>
@@ -14,6 +20,12 @@ defineProps({
 <template>
 	<div>
 		<div class="relative w-[62px] h-[62px]">
+			<!-- Ringed rather than replacing the device glyph: which device is
+			     being connected to is the thing worth keeping on screen. -->
+			<span
+				v-if="busy"
+				class="absolute inset-0 rounded-full border-2 border-current border-t-transparent opacity-50 animate-spin"
+				aria-hidden="true" />
 			<svg
 				v-if="item.ack_bytes" width="62" height="62" viewBox="0 0 250 250"
 				class="circular-progress" :style="utils.getProgress(item)"

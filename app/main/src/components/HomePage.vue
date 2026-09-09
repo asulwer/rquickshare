@@ -6,7 +6,7 @@
 		<Heading :vm="vm" :open-url="openUrl" @open-settings="settingsOpen = true" />
 
 		<div class="flex-1 flex flex-row">
-			<SideMenu :vm="vm" @invert-visibility="invertVisibility(vm)" @clear-sending="clearSending(vm)" />
+			<SideMenu :vm="vm" @invert-visibility="invertVisibility(vm)" @clear-sending="stopSending()" />
 
 			<div class="flex-1 flex flex-col bg-white dark:bg-neutral-800 w-full max-w-full min-w-0 min-h-full rounded-tl-[3rem] p-12 h-1 overflow-y-scroll">
 				<ContentStatus :vm="vm" @outbound-payload="(el: OutboundPayload) => outboundPayload = el" @discovery-running="discoveryRunning = true;" />
@@ -25,15 +25,29 @@
 
 				<div
 					v-for="item in displayedItems" :key="item.id" class="w-full rounded-3xl flex flex-row gap-6 p-4 mb-4 bg-green-100 dark:bg-neutral-700"
-					:class="{'cursor-pointer': item.endpoint}" @click="item.endpoint && sendInfo(vm, item.id)">
+					:class="{
+						'pressable hover:bg-green-200 dark:hover:bg-neutral-600': item.endpoint && !sending.has(item.id),
+						'opacity-60 cursor-wait pointer-events-none': sending.has(item.id)
+					}"
+					:aria-disabled="sending.has(item.id)" :aria-busy="sending.has(item.id)"
+					@click="item.endpoint && startSend(item.id)">
 					<!-- Loader and image of the device type & pin_code -->
-					<ItemSide :item="item" />
+					<ItemSide :item="item" :busy="item.endpoint === true && sending.has(item.id)" />
 
 					<!-- Content and state of the transfer -->
 					<div class="flex-1 flex flex-col text-sm min-w-0" :class="{'justify-center': item.state === undefined}">
 						<h4 class="text-base font-medium">
 							{{ item.name }}
 						</h4>
+
+						<!-- Connecting to a device takes a while - seconds on the LAN,
+							 up to a minute over BLE - and until the first state comes
+							 back this is still an endpoint card, so without this the
+							 click left no trace at all and the user kept clicking. The
+							 spinner itself is the ring around the device icon. -->
+						<p v-if="item.endpoint && sending.has(item.id)" class="mt-2">
+							Connecting...
+						</p>
 
 						<div v-if="item.state === 'WaitingForUserConsent'" class="flex-1 flex flex-col justify-between">
 							<p class="mt-4">
@@ -251,6 +265,12 @@ export default {
 			// transfer setup twice.
 			responding: ref<Map<string, ChannelAction>>(new Map()),
 
+			// Endpoint ids we've asked the backend to send to and not yet heard
+			// back about. Same purpose as `responding`, for the outbound side.
+			sending: ref<Set<string>>(new Set()),
+			// eslint-disable-next-line no-undef
+			sendWatchdogs: new Map<string, NodeJS.Timeout>(),
+
 			// eslint-disable-next-line no-undef
 			cleanupInterval: opt<NodeJS.Timeout>(),
 			unlisten: Array<UnlistenFn>(),
@@ -322,6 +342,14 @@ export default {
 						this.responding.delete(cm.id);
 					}
 
+					// Drop the "Connecting..." spinner once the transfer has a card
+					// of its own to report through. The intermediate handshake
+					// states aren't displayed, so waiting for one of those would
+					// blank the card out mid-connect.
+					if (cm.state && this.stateToDisplay.includes(cm.state)) {
+						this.clearSendWatchdog(cm.id);
+					}
+
 					if (cm.state === "Disconnected") {
 						this.toDelete.push({
 							id: cm.id,
@@ -373,7 +401,7 @@ export default {
 					if (ei.qr_match && this.outboundPayload !== undefined && !this.qrAutoSent) {
 						this.qrAutoSent = true;
 						this.qrSvg = undefined;
-						await this.sendInfo(this, ei.id);
+						await this.startSend(ei.id);
 					}
 				})
 			);
@@ -491,6 +519,49 @@ export default {
 			} catch (e) {
 				this.toastStore.addToast("Unknown error while copying text", ToastType.Error);
 				console.error("Error copying text", e);
+			}
+		},
+		// Cancelling the whole send drops the staged payload and the device list,
+		// so any spinner still up belongs to a device that is about to vanish.
+		stopSending: async function() {
+			for (const id of Array.from(this.sendWatchdogs.keys())) {
+				this.clearSendWatchdog(id);
+			}
+			await this.clearSending(this);
+		},
+		clearSendWatchdog: function(id: string) {
+			const timer = this.sendWatchdogs.get(id);
+			if (timer !== undefined) {
+				window.clearTimeout(timer as unknown as number);
+				this.sendWatchdogs.delete(id);
+			}
+			this.sending.delete(id);
+		},
+		// Clicking a device only queues the transfer; the backend then has to
+		// connect and get through the handshake before anything about it is
+		// displayable. Hold a spinner over that gap, and refuse a second click
+		// for the same device while it's open - the backend ignores duplicates
+		// anyway, so a second click could only ever be a wasted one.
+		startSend: async function(id: string) {
+			if (this.sending.has(id)) return;
+			this.sending.add(id);
+
+			// The backend reports every failure it can, but it can't report a
+			// hang. Rather than stranding the card on a spinner with no way back,
+			// give up after two minutes - comfortably longer than the slowest
+			// BLE connect we've measured.
+			this.sendWatchdogs.set(id, setTimeout(() => {
+				if (!this.sending.has(id)) return;
+				this.clearSendWatchdog(id);
+				this.toastStore.addToast("No answer from that device - try again", ToastType.Error);
+			}, 120_000));
+
+			try {
+				await this.sendInfo(this, id);
+			} catch (e) {
+				this.clearSendWatchdog(id);
+				this.toastStore.addToast(e instanceof Error ? e.message : "Could not start the transfer", ToastType.Error);
+				console.error("Error sending to endpoint", e);
 			}
 		},
 		respondToTransfer: async function(id: string, action: ChannelAction) {
