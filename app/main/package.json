@@ -14,7 +14,8 @@
     "ts-check": "vue-tsc --noEmit",
     "preview": "vite preview",
     "check": "cd src-tauri && cargo check",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "bump": "node ../../scripts/bump.mjs"
   },
   "dependencies": {
     "@martichou/core_lib": "link:..\\..\\core_lib",
