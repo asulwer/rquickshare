@@ -17,7 +17,7 @@ function openFilePicker() {
 		title: "Select a file to send",
 		directory: false,
 		multiple: true,
-	}).then(async (el) => {
+	}).then((el) => {
 		let elem;
 		if (el === null) {
 			return;
@@ -36,7 +36,6 @@ function openFilePicker() {
 		emits('outboundPayload', {
 			Files: elem
 		} as OutboundPayload);
-		if (!props.vm.discoveryRunning) props.vm.qrSvg = await props.vm.invoke('start_discovery');
 		emits('discoveryRunning');
 	})
 }

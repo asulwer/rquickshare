@@ -9,7 +9,7 @@
 			<SideMenu :vm="vm" @invert-visibility="invertVisibility(vm)" @clear-sending="stopSending()" />
 
 			<div class="flex-1 flex flex-col bg-white dark:bg-neutral-800 w-full max-w-full min-w-0 min-h-full rounded-tl-[3rem] p-12 h-1 overflow-y-scroll">
-				<ContentStatus :vm="vm" @outbound-payload="(el: OutboundPayload) => outboundPayload = el" @discovery-running="discoveryRunning = true;" />
+				<ContentStatus :vm="vm" @outbound-payload="(el: OutboundPayload) => outboundPayload = el" @discovery-running="startDiscovery" />
 
 				<!-- Scanning this makes a phone advertise itself to us even when
 				     it isn't set to "Everyone" visibility - the scan is the
@@ -423,8 +423,7 @@ export default {
 						this.outboundPayload = {
 							Files: event.payload.paths
 						} as OutboundPayload;
-						if (!this.discoveryRunning) this.qrSvg = await invoke('start_discovery');
-						this.discoveryRunning = true;
+						await this.startDiscovery();
 					} else {
 						this.isDragHovering = false;
 					}
@@ -451,8 +450,7 @@ export default {
 
 				this.lastClipboard = text;
 				this.outboundPayload = { Text: text } as OutboundPayload;
-				if (!this.discoveryRunning) this.qrSvg = await invoke('start_discovery');
-				this.discoveryRunning = true;
+				await this.startDiscovery();
 				this.toastStore.addToast("Text ready to send - pick a device", ToastType.Success);
 			};
 			window.addEventListener('keydown', onPaste);
@@ -475,8 +473,7 @@ export default {
 
 				this.lastClipboard = text;
 				this.outboundPayload = { Text: text } as OutboundPayload;
-				if (!this.discoveryRunning) this.qrSvg = await invoke('start_discovery');
-				this.discoveryRunning = true;
+				await this.startDiscovery();
 				this.toastStore.addToast("Clipboard text staged to send - pick a device", ToastType.Success);
 			}, 1500);
 			this.unlisten.push(() => window.clearInterval(clipboardTimer));
@@ -512,6 +509,18 @@ export default {
 	},
 
 	methods: {
+		// Discovery is what makes us visible and produces the pairing QR. It is
+		// idempotent from the caller's side: several UI paths stage a payload and
+		// all of them need discovery up, but only the first should actually start
+		// it. Kept here rather than in the children so `qrSvg` has exactly one
+		// writer - children ask for discovery by emitting, they don't reach into
+		// the shared vm to set it.
+		startDiscovery: async function() {
+			if (!this.discoveryRunning) {
+				this.qrSvg = await invoke<string>('start_discovery');
+			}
+			this.discoveryRunning = true;
+		},
 		writeToClipboard: async function(text: string) {
 			try {
 				await writeText(text);
