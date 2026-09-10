@@ -70,10 +70,14 @@ function openDownloadPicker() {
 							<span class="text-xs opacity-70">Applies immediately. Use "trace" to capture a problem.</span>
 						</span>
 						<select
-							class="rounded-xl bg-transparent border border-gray-500 border-opacity-30 px-2 py-1 text-sm cursor-pointer focus:outline-none"
+							class="rounded-xl bg-white dark:bg-neutral-700 border border-gray-500 border-opacity-30 px-2 py-1 text-sm cursor-pointer focus:outline-none"
 							:value="vm.debugLevel"
 							@change="utils.setLoggingLevel(vm, ($event.target as HTMLSelectElement).value)">
-							<option v-for="level in loggingLevels" :key="level" :value="level" class="text-black">
+							<!-- The popup is drawn by the OS, so the options need their own
+							     colours - inheriting leaves black-on-dark in dark mode. -->
+							<option
+								v-for="level in loggingLevels" :key="level" :value="level"
+								class="bg-white text-gray-900 dark:bg-neutral-700 dark:text-gray-200">
 								{{ level }}
 							</option>
 						</select>
