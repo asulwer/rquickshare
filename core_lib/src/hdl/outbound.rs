@@ -556,10 +556,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                 ),
                 connection_request: Some(location_nearby_connections::ConnectionRequestFrame {
                     endpoint_id: Some(String::from_utf8_lossy(&self.endpoint_id).to_string()),
-                    endpoint_name: Some(hostname::get()?.to_string_lossy().into_owned().into_bytes()),
+                    // What the peer shows as "sharing with you", so it follows
+                    // the user's chosen name rather than the raw hostname.
+                    endpoint_name: Some(crate::utils::device_name().into_bytes()),
                     endpoint_info: Some(
                         RemoteDeviceInfo {
-                            name: hostname::get()?.to_string_lossy().into_owned(),
+                            name: crate::utils::device_name(),
                             device_type: DeviceType::Laptop,
                         }
                         .serialize(),

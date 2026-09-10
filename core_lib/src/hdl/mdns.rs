@@ -9,7 +9,7 @@ use tokio::time::{interval_at, Instant};
 use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 
-use crate::utils::{gen_mdns_endpoint_info, gen_mdns_name, DeviceType};
+use crate::utils::{device_name, gen_mdns_endpoint_info, gen_mdns_name, DeviceType};
 
 const INNER_NAME: &str = "MDnsServer";
 const TICK_INTERVAL: Duration = Duration::from_secs(60);
@@ -39,6 +39,13 @@ pub struct MDnsServer {
     ble_receiver: Receiver<()>,
     visibility_sender: Arc<Mutex<watch::Sender<Visibility>>>,
     visibility_receiver: watch::Receiver<Visibility>,
+    // Ticks when the user renames the device; the new name is read from
+    // `device_name()` rather than carried on the channel.
+    device_name_receiver: watch::Receiver<()>,
+    // Kept so the service record can be rebuilt under a new name.
+    endpoint_id: [u8; 4],
+    service_port: u16,
+    device_type: DeviceType,
 }
 
 impl MDnsServer {
@@ -48,8 +55,10 @@ impl MDnsServer {
         ble_receiver: Receiver<()>,
         visibility_sender: Arc<Mutex<watch::Sender<Visibility>>>,
         visibility_receiver: watch::Receiver<Visibility>,
+        device_name_receiver: watch::Receiver<()>,
     ) -> Result<Self, anyhow::Error> {
-        let service_info = Self::build_service(endpoint_id, service_port, DeviceType::Laptop)?;
+        let device_type = DeviceType::Laptop;
+        let service_info = Self::build_service(endpoint_id, service_port, device_type.clone())?;
 
         Ok(Self {
             daemon: ServiceDaemon::new()?,
@@ -57,6 +66,10 @@ impl MDnsServer {
             ble_receiver,
             visibility_sender,
             visibility_receiver,
+            device_name_receiver,
+            endpoint_id,
+            service_port,
+            device_type,
         })
     }
 
@@ -91,6 +104,25 @@ impl MDnsServer {
                     } else if visibility == Visibility::Temporarily {
                         self.daemon.register(self.service_info.clone())?;
                         interval.reset();
+                    }
+                }
+                _ = self.device_name_receiver.changed() => {
+                    self.device_name_receiver.borrow_and_update();
+
+                    // The instance name is derived from the endpoint id, not the
+                    // device name, so the fullname is unchanged and there is no
+                    // stale record to unregister - upstream documents calling
+                    // register() again as the way to re-announce updated info.
+                    let rebuilt = Self::build_service(
+                        self.endpoint_id,
+                        self.service_port,
+                        self.device_type.clone(),
+                    )?;
+                    self.service_info = rebuilt;
+
+                    debug!("{INNER_NAME}: device name changed, re-announcing");
+                    if visibility != Visibility::Invisible {
+                        self.daemon.register(self.service_info.clone())?;
                     }
                 }
                 _ = ble_receiver.recv() => {
@@ -147,9 +179,16 @@ impl MDnsServer {
         device_type: DeviceType,
     ) -> Result<ServiceInfo, anyhow::Error> {
         let name = gen_mdns_name(endpoint_id);
+        // The advertised *display* name, which the user can override.
+        let display_name = device_name();
+        info!("Broadcasting with: {display_name}");
+        let endpoint_info = gen_mdns_endpoint_info(device_type as u8, &display_name);
+
+        // The host record stays on the real hostname even after a rename. It is
+        // a network name other hosts resolve, not something we display, and
+        // pointing it at a user-chosen string invites collisions on a LAN where
+        // two machines get the same nickname.
         let hostname = ::hostname::get()?.to_string_lossy().into_owned();
-        info!("Broadcasting with: {hostname}");
-        let endpoint_info = gen_mdns_endpoint_info(device_type as u8, &hostname);
 
         // The mDNS host name must be fully qualified; the *display* name must not
         // be. These were the same string until mdns-sd 0.11.0 made `register()`

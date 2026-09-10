@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { loggingLevels, utils } from '../vue_lib';
-import { PropType } from 'vue';
+import { PropType, ref, watch } from 'vue';
 import { TauriVM } from '../vue_lib/helper/ParamsHelper';
 
 const props = defineProps({
@@ -11,6 +11,29 @@ const props = defineProps({
 });
 
 const emit = defineEmits(['close']);
+
+// Edited locally and committed on blur or Enter, rather than on every
+// keystroke: each commit re-announces over mDNS, and doing that per character
+// would spam the network and make peers flicker through half-typed names.
+const nameDraft = ref(props.vm.deviceNameOverride ?? '');
+
+watch(() => props.vm.deviceNameOverride, (v) => {
+	nameDraft.value = v ?? '';
+});
+
+async function commitDeviceName() {
+	const next = nameDraft.value.trim();
+	if (next === (props.vm.deviceNameOverride ?? '')) {
+		return;
+	}
+
+	await utils.setDeviceName(props.vm, next);
+}
+
+async function resetDeviceName() {
+	nameDraft.value = '';
+	await utils.setDeviceName(props.vm, undefined);
+}
 
 function openDownloadPicker() {
 	props.vm.dialogOpen({
@@ -40,25 +63,46 @@ function openDownloadPicker() {
 			</div>
 			<div class="py-4 flex flex-col">
 				<div class="form-control hover:bg-gray-500 hover:bg-opacity-10 rounded-xl p-3">
-					<label class="cursor-pointer flex flex-row justify-between items-center" @click="utils.setAutoStart(vm, !vm.autostart)">
+					<label class="flex flex-col items-start gap-1">
+						<span class="flex flex-row justify-between items-center w-full">
+							<span class="label-text">Device name</span>
+							<span
+								v-if="vm.deviceNameOverride" class="text-xs cursor-pointer select-none underline opacity-70
+								transition duration-150 ease-in-out hover:opacity-100 active:opacity-40"
+								@click="resetDeviceName()">
+								Reset
+							</span>
+						</span>
+						<input
+							v-model="nameDraft" type="text" :placeholder="vm.hostnameDefault ?? 'This device'"
+							maxlength="64"
+							class="w-full rounded-xl bg-white dark:bg-neutral-700 border border-gray-500 border-opacity-30 px-2 py-1 text-sm focus:outline-none"
+							@blur="commitDeviceName()" @keyup.enter="commitDeviceName()">
+						<span class="text-xs opacity-70">
+							What nearby devices show. Empty follows the hostname.
+						</span>
+					</label>
+				</div>
+				<div class="form-control hover:bg-gray-500 hover:bg-opacity-10 rounded-xl p-3">
+					<label class="pressable flex flex-row justify-between items-center" @click="utils.setAutoStart(vm, !vm.autostart)">
 						<span class="label-text">Start on boot</span>
 						<input type="checkbox" :checked="vm.autostart" class="checkbox focus:outline-none">
 					</label>
 				</div>
 				<div class="form-control hover:bg-gray-500 hover:bg-opacity-10 rounded-xl p-3">
-					<label class="cursor-pointer flex flex-row justify-between items-center" @click="utils.setRealClose(vm, !vm.realclose)">
+					<label class="pressable flex flex-row justify-between items-center" @click="utils.setRealClose(vm, !vm.realclose)">
 						<span class="label-text">Keep running on close</span>
 						<input type="checkbox" :checked="!vm.realclose" class="checkbox focus:outline-none">
 					</label>
 				</div>
 				<div class="form-control hover:bg-gray-500 hover:bg-opacity-10 rounded-xl p-3">
-					<label class="cursor-pointer flex flex-row justify-between items-center" @click="utils.setStartMinimized(vm, !vm.startminimized)">
+					<label class="pressable flex flex-row justify-between items-center" @click="utils.setStartMinimized(vm, !vm.startminimized)">
 						<span class="label-text">Start minimized</span>
 						<input type="checkbox" :checked="vm.startminimized" class="checkbox focus:outline-none">
 					</label>
 				</div>
 				<div class="form-control hover:bg-gray-500 hover:bg-opacity-10 rounded-xl p-3">
-					<label class="cursor-pointer flex flex-row justify-between items-center" @click="utils.setClipboardAutosync(vm, !vm.clipboardAutosync)">
+					<label class="pressable flex flex-row justify-between items-center" @click="utils.setClipboardAutosync(vm, !vm.clipboardAutosync)">
 						<span class="label-text">Auto-stage clipboard text</span>
 						<input type="checkbox" :checked="vm.clipboardAutosync" class="checkbox focus:outline-none">
 					</label>
@@ -84,7 +128,7 @@ function openDownloadPicker() {
 					</label>
 				</div>
 				<div class="form-control hover:bg-gray-500 hover:bg-opacity-10 rounded-xl p-3">
-					<label class="cursor-pointer flex flex-col items-start" @click="openDownloadPicker()">
+					<label class="pressable flex flex-col items-start" @click="openDownloadPicker()">
 						<span class="">Change download folder</span>
 						<span class="overflow-hidden whitespace-nowrap text-ellipsis text-xs max-w-80">
 							> {{ vm.downloadPath ?? 'OS User\'s download folder' }}

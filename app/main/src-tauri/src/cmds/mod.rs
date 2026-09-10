@@ -4,6 +4,8 @@ mod change_logging_level;
 pub use change_logging_level::*;
 mod change_visibility;
 pub use change_visibility::*;
+mod device_name;
+pub use device_name::*;
 mod discovery;
 pub use discovery::*;
 mod get_hostname;

@@ -83,7 +83,7 @@ mod utils;
 
 pub use hdl::{EndpointInfo, OutboundPayload, State, Visibility};
 pub use manager::SendInfo;
-pub use utils::DeviceType;
+pub use utils::{device_name, truncate_device_name, DeviceType, MAX_DEVICE_NAME_LEN};
 
 pub mod sharing_nearby {
     include!(concat!(env!("OUT_DIR"), "/sharing.nearby.rs"));
@@ -103,6 +103,13 @@ pub mod location_nearby_connections {
 
 static CUSTOM_DOWNLOAD: Lazy<RwLock<Option<PathBuf>>> = Lazy::new(|| RwLock::new(None));
 
+/// User-chosen name to advertise instead of the machine hostname.
+///
+/// `None` means "fall back to the hostname"; see [`utils::device_name`], which
+/// is the only thing that should read this.
+pub(crate) static CUSTOM_DEVICE_NAME: Lazy<RwLock<Option<String>>> =
+    Lazy::new(|| RwLock::new(None));
+
 #[derive(Debug)]
 pub struct RQS {
     tracker: Option<TaskTracker>,
@@ -117,6 +124,12 @@ pub struct RQS {
 
     // Only used to send the info "a nearby device is sharing"
     ble_sender: broadcast::Sender<()>,
+
+    // Tells the mDNS server that `device_name()` changed so it can re-announce
+    // under the new name. Only a tick: the name itself lives in
+    // CUSTOM_DEVICE_NAME, which stays the single source of truth.
+    device_name_sender: watch::Sender<()>,
+    device_name_receiver: watch::Receiver<()>,
 
     port_number: Option<u32>,
 
@@ -140,6 +153,7 @@ impl RQS {
 
         let (message_sender, _) = broadcast::channel(50);
         let (ble_sender, _) = broadcast::channel(5);
+        let (device_name_sender, device_name_receiver) = watch::channel(());
 
         // Define default visibility as per the args inside the new()
         let (visibility_sender, visibility_receiver) = watch::channel(Visibility::Invisible);
@@ -152,6 +166,8 @@ impl RQS {
             visibility_sender: Arc::new(Mutex::new(visibility_sender)),
             visibility_receiver,
             ble_sender,
+            device_name_sender,
+            device_name_receiver,
             port_number,
             message_sender,
         }
@@ -218,6 +234,7 @@ impl RQS {
             self.ble_sender.subscribe(),
             self.visibility_sender.clone(),
             self.visibility_receiver.clone(),
+            self.device_name_receiver.clone(),
         )?;
         let ctk = ctoken.clone();
         // Log the outcome rather than dropping it. These `run` methods return
@@ -243,9 +260,7 @@ impl RQS {
             let ble_recv = crate::hdl::BleReceiverAdvertiser::new(
                 endpoint_id[..4].try_into()?,
                 crate::utils::DeviceType::Laptop as u8,
-                ::hostname::get()
-                    .map(|h| h.to_string_lossy().into_owned())
-                    .unwrap_or_else(|_| "rquickshare".to_string()),
+                crate::utils::device_name(),
                 self.message_sender.clone(),
             );
             let ctk = ctoken.clone();
@@ -378,6 +393,35 @@ impl RQS {
 
         self.ctoken = None;
         self.tracker = None;
+    }
+
+    /// Set the name advertised to peers. `None` restores the hostname.
+    ///
+    /// Takes effect immediately: the mDNS server re-announces under the new
+    /// name, so a phone already listing us picks it up without a restart.
+    pub fn set_device_name(&self, name: Option<String>) {
+        // An all-whitespace name would advertise as blank, so treat it as
+        // "unset" and fall back to the hostname.
+        let name = name.and_then(|n| {
+            let trimmed = n.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(utils::truncate_device_name(trimmed))
+            }
+        });
+
+        debug!("Setting the device name to {name:?}");
+        {
+            let mut guard = match CUSTOM_DEVICE_NAME.write() {
+                Ok(guard) => guard,
+                Err(e) => e.into_inner(),
+            };
+            *guard = name;
+        }
+
+        // Wakes the mDNS server even if no one else is listening.
+        let _ = self.device_name_sender.send(());
     }
 
     // Setting None here will resume the default settings
