@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
@@ -42,6 +44,10 @@ pub struct TcpServer {
     tcp_listener: TcpListener,
     sender: Sender<ChannelMessage>,
     connect_receiver: Receiver<SendInfo>,
+    /// Peers with an outbound attempt already running. A send is one entire
+    /// transfer long, so without this a second request for the same peer would
+    /// open a second connection to a device that is already receiving.
+    outbound_inflight: Arc<Mutex<HashSet<String>>>,
 }
 
 impl TcpServer {
@@ -56,6 +62,7 @@ impl TcpServer {
             tcp_listener,
             sender,
             connect_receiver,
+            outbound_inflight: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -72,9 +79,44 @@ impl TcpServer {
                 }
                 Some(i) = self.connect_receiver.recv() => {
                     info!("{INNER_NAME}: connect_receiver: got {:?}", i);
-                    if let Err(e) = self.connect(cctk, i).await {
-                        error!("{INNER_NAME}: error sending: {e}");
+
+                    // Spawned, like the inbound branch below, because a send is
+                    // an entire transfer long. Awaited here it held the whole
+                    // select loop: queued sends ran strictly one after another
+                    // and `accept()` was starved for the duration. A user who
+                    // clicked an unreachable BLE peer a few times (each attempt
+                    // failing only on a 5-40s timeout) then waited minutes for
+                    // the queue to reach the LAN entry that actually worked.
+                    let id = i.id.clone();
+                    if !self.outbound_inflight.lock().unwrap().insert(id.clone()) {
+                        info!("{INNER_NAME}: already sending to {id}, ignoring duplicate request");
+                        continue;
                     }
+
+                    let endpoint_id = self.endpoint_id;
+                    let sender = self.sender.clone();
+                    let inflight = self.outbound_inflight.clone();
+
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::connect(endpoint_id, sender.clone(), cctk, i).await {
+                            error!("{INNER_NAME}: error sending: {e}");
+
+                            // Failing to even get a stream (no route, BLE peer
+                            // out of range, handshake refused) used to be logged
+                            // and nothing else, so the front end kept showing the
+                            // device as if the click had never happened. Report it
+                            // under the same id every other message for this
+                            // transfer uses.
+                            let _ = sender.send(ChannelMessage {
+                                id: id.clone(),
+                                direction: ChannelDirection::LibToFront,
+                                state: Some(State::Disconnected),
+                                ..Default::default()
+                            });
+                        }
+
+                        inflight.lock().unwrap().remove(&id);
+                    });
                 }
                 r = self.tcp_listener.accept() => {
                     match r {
@@ -151,13 +193,22 @@ impl TcpServer {
         Ok(())
     }
 
-    /// To be called inside a separate task if we want to handle concurrency
+    /// Runs one outbound attempt to completion; always spawned, never awaited
+    /// on the accept loop.
     ///
     /// `si.addr` is normally `ip:port` from mDNS. A peer found over BLE has no
     /// IP, so `BleDiscovery` reports it as `ble:<bluetooth address>` and it is
     /// routed onto the Weave socket instead - which is the only way to reach a
     /// phone whose WiFi is off.
-    pub async fn connect(&self, ctk: CancellationToken, si: SendInfo) -> Result<(), anyhow::Error> {
+    ///
+    /// Takes the two pieces of the server it needs by value rather than `&self`
+    /// so the whole attempt can be driven from a spawned task.
+    async fn connect(
+        endpoint_id: [u8; 4],
+        sender: Sender<ChannelMessage>,
+        ctk: CancellationToken,
+        si: SendInfo,
+    ) -> Result<(), anyhow::Error> {
         debug!("{INNER_NAME}: Connecting to: {}", si.addr);
 
         #[cfg(feature = "experimental")]
@@ -215,25 +266,27 @@ impl TcpServer {
             // longer advertising, cascading into a shutdown hang. If retried
             // again it must disconnect the peripheral between attempts and not
             // block shutdown.
-            return self
-                .drive_outbound(
-                    ctk,
-                    si,
-                    stream,
-                    Some(8 * 1024),
-                    Some((upgrade_tx, switch_tx, switched)),
-                )
-                .await;
+            return Self::drive_outbound(
+                endpoint_id,
+                sender,
+                ctk,
+                si,
+                stream,
+                Some(8 * 1024),
+                Some((upgrade_tx, switch_tx, switched)),
+            )
+            .await;
         }
 
         let socket = TcpStream::connect(si.addr.clone()).await?;
-        self.drive_outbound(ctk, si, socket, None, None).await
+        Self::drive_outbound(endpoint_id, sender, ctk, si, socket, None, None).await
     }
 
     /// The transport-independent half of `connect`: everything after a stream
     /// exists. Generic so the same code drives TCP and the BLE Weave socket.
     async fn drive_outbound<S>(
-        &self,
+        endpoint_id: [u8; 4],
+        sender: Sender<ChannelMessage>,
         ctk: CancellationToken,
         si: SendInfo,
         stream: S,
@@ -252,10 +305,10 @@ impl TcpServer {
         let transfer_id = si.id.clone();
 
         let mut or = OutboundRequest::new(
-            self.endpoint_id,
+            endpoint_id,
             stream,
             si.id,
-            self.sender.clone(),
+            sender.clone(),
             si.ob,
             RemoteDeviceInfo {
                 device_type: crate::DeviceType::Unknown,
@@ -309,7 +362,7 @@ impl TcpServer {
                                     // sending, and sent the user's cancel presses
                                     // to a session that had already gone - seven
                                     // of them, all inert.
-                                    let _ = self.sender.clone().send(ChannelMessage {
+                                    let _ = sender.send(ChannelMessage {
                                         id: transfer_id.clone(),
                                         direction: ChannelDirection::LibToFront,
                                         state: Some(State::Disconnected),
