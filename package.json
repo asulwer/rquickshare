@@ -1,0 +1,8 @@
+{
+	"name": "rquickshare-workspace",
+	"private": true,
+	"description": "Repo-root scripts. The app itself lives in app/main.",
+	"scripts": {
+		"bump": "node scripts/bump.mjs"
+	}
+}
