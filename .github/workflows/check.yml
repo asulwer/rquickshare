@@ -1,0 +1,77 @@
+# Everything that can fail without building a bundle. Split out of the old
+# lint.yml so a broken lint reports as "Check / lint_js" rather than hiding
+# inside a build, and so none of it waits on Tauri.
+name: Check
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  test_rust:
+    name: cargo test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: ./.github/actions/linux-deps
+      # --workspace picks up app/main/src-tauri, which the old `cd core_lib`
+      # form never ran.
+      - run: cargo test --workspace --all-features
+
+  frontend:
+    name: ${{ matrix.script }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - script: lint
+            run: pnpm lint
+          - script: ts-check
+            run: pnpm ts-check
+          # The only suite today is tests/unit/example.test.ts asserting
+          # 1 === 1. Wired up so the first real test is enforced for free;
+          # --passWithNoTests keeps the job honest if that stub is deleted.
+          - script: test
+            run: pnpm vitest run --passWithNoTests
+    defaults:
+      run:
+        working-directory: app/main
+    steps:
+      - uses: actions/checkout@v4
+      # No `version:` - action-setup reads packageManager from the app's
+      # package.json, so CI and local stay on the same pnpm. There is no
+      # package.json at the repo root, hence the explicit path.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: app/main/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: app/main/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: ${{ matrix.run }}
