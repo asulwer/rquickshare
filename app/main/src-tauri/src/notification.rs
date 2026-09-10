@@ -99,13 +99,27 @@ pub fn send_temporarily_notification(app_handle: &AppHandle) {
             // TODO - Meh, untracked, unwaited tasks...
             #[cfg(target_os = "linux")]
             tokio::task::spawn(async move {
-                n.wait_for_action(|action| match action {
-                    "visible" => {
-                        cmds::change_visibility(Visibility::Temporarily, capp_handle.state());
+                // wait_for_action blocks until the user clicks or the
+                // notification expires, so it can't sit on an async worker.
+                // It also takes a sync closure, which is why the action is
+                // carried back out rather than acted on in place.
+                let chosen = tokio::task::spawn_blocking(move || {
+                    let mut chosen: Option<String> = None;
+                    n.wait_for_action(|action| chosen = Some(action.to_owned()));
+                    chosen
+                })
+                .await;
+
+                if let Ok(Some(action)) = chosen {
+                    if action == "visible" {
+                        if let Err(e) =
+                            cmds::change_visibility(Visibility::Temporarily, capp_handle.state())
+                                .await
+                        {
+                            error!("Couldn't make the device visible: {e}");
+                        }
                     }
-                    "ignore" => {}
-                    _ => (),
-                });
+                }
             });
         }
         Err(e) => {
