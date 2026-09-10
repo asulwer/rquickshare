@@ -21,9 +21,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      # rustfmt.toml uses indent_style and group_imports, which stable rustfmt
-      # ignores with a warning - it must be nightly or the check is a no-op.
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
       - run: cargo fmt --all --check
