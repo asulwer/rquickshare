@@ -569,7 +569,12 @@ export default {
 				await this.sendInfo(this, id);
 			} catch (e) {
 				this.clearSendWatchdog(id);
-				this.toastStore.addToast(e instanceof Error ? e.message : "Could not start the transfer", ToastType.Error);
+				// A rejected Tauri command surfaces its `Err(String)` as a raw
+				// string, not an Error, so handle both before falling back.
+				const msg = typeof e === 'string' ? e
+					: e instanceof Error ? e.message
+					: "Could not start the transfer";
+				this.toastStore.addToast(msg, ToastType.Error);
 				console.error("Error sending to endpoint", e);
 			}
 		},
