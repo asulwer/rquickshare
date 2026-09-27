@@ -287,3 +287,83 @@ fn aes256_cbc_decrypt_throughput() {
         mib / secs
     );
 }
+
+/// The sender must let the receiver hang up. Windows Quick Share reports
+/// "Can't complete transfer" when our DISCONNECTION arrives before it has
+/// finished with the last payload, so the outbound session has to end on the
+/// peer's disconnect - well inside the grace period - not on its own.
+#[tokio::test]
+async fn loopback_text_send_ends_on_the_receivers_hang_up() {
+    use crate::channel::{ChannelAction, ChannelDirection, ChannelMessage};
+    use crate::errors::AppError;
+
+    let (client, server) = duplex(64 * 1024);
+    let (in_tx, _in_rx) = broadcast::channel(64);
+    let (out_tx, _out_rx) = broadcast::channel(64);
+
+    let mut ir = InboundRequest::new(server, "inbound".to_owned(), in_tx.clone());
+    let mut or = OutboundRequest::new(
+        *b"abcd",
+        client,
+        "outbound".to_owned(),
+        out_tx,
+        OutboundPayload::Text("hello".to_owned()),
+        RemoteDeviceInfo {
+            name: "peer".to_owned(),
+            device_type: DeviceType::Laptop,
+        },
+    );
+    or.send_connection_request()
+        .await
+        .expect("send_connection_request");
+    or.send_ukey2_client_init()
+        .await
+        .expect("send_ukey2_client_init");
+
+    let inbound = async move {
+        let mut accepted = false;
+        loop {
+            if !accepted && ir.state.state == State::WaitingForUserConsent {
+                accepted = true;
+                in_tx
+                    .send(ChannelMessage {
+                        id: "inbound".to_owned(),
+                        direction: ChannelDirection::FrontToLib,
+                        action: Some(ChannelAction::AcceptTransfer),
+                        ..Default::default()
+                    })
+                    .expect("accept");
+            }
+            if let Err(e) = ir.handle().await {
+                assert!(
+                    matches!(e.downcast_ref(), Some(AppError::NotAnError)),
+                    "inbound failed: {e}"
+                );
+                break;
+            }
+        }
+        ir
+    };
+    let outbound = async move {
+        let started = tokio::time::Instant::now();
+        loop {
+            if or.handle().await.is_err() {
+                break;
+            }
+        }
+        (or, started.elapsed())
+    };
+
+    let (ir, (or, elapsed)) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(inbound, outbound)
+    })
+    .await
+    .expect("transfer timed out");
+
+    assert_eq!(ir.state.state, State::Finished);
+    assert_eq!(or.state.state, State::Finished);
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "outbound waited out its grace period instead of seeing the hang-up"
+    );
+}
