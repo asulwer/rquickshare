@@ -1257,6 +1257,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                         .file_name()
                         .ok_or_else(|| anyhow!("Failed to get file_name for {f}"))?;
                     let fmeta = FileMetadata {
+                        // The attachment id, distinct from the payload id and
+                        // required. Google's receiver swaps an id of 0 for a
+                        // random one but files the payload under 0, so it never
+                        // pairs the payload with its attachment: Windows Quick
+                        // Share saved the file and still said "Can't complete
+                        // transfer".
+                        id: Some(rand::rng().random::<i64>()),
                         payload_id: Some(rand::rng().random::<i64>()),
                         name: Some(fname.to_os_string().into_string().unwrap()),
                         size: Some(fmetadata.len() as i64),
