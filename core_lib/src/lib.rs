@@ -7,7 +7,10 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::anyhow;
 use channel::ChannelMessage;
-#[cfg(all(feature = "experimental", any(target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    feature = "experimental",
+    any(target_os = "linux", target_os = "windows")
+))]
 use hdl::BleAdvertiser;
 use hdl::MDnsDiscovery;
 use once_cell::sync::Lazy;
@@ -266,7 +269,10 @@ impl RQS {
         // Connect"; getting the phone to actually list us (M2) needs the full
         // advertisement served over GATT or extended advertising - next step.
         // Non-fatal: like BleListener, it's a nice-to-have.
-        #[cfg(all(feature = "experimental", any(target_os = "linux", target_os = "windows")))]
+        #[cfg(all(
+            feature = "experimental",
+            any(target_os = "linux", target_os = "windows")
+        ))]
         {
             let ble_recv = crate::hdl::BleReceiverAdvertiser::new(
                 endpoint_id[..4].try_into()?,
@@ -324,7 +330,10 @@ impl RQS {
         let ctk = CancellationToken::new();
         self.discovery_ctk = Some(ctk.clone());
 
-        #[cfg(all(feature = "experimental", any(target_os = "linux", target_os = "windows")))]
+        #[cfg(all(
+            feature = "experimental",
+            any(target_os = "linux", target_os = "windows")
+        ))]
         {
             let ctk_blea = ctk.clone();
             tracker.spawn(async move {

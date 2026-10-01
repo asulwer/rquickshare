@@ -46,10 +46,8 @@ const ADV_SLOT0_CHARACTERISTIC_GUID: GUID =
 //   server tx = us -> phone   (we notify)
 // Only ...0101 is confirmed from logcat; ...0102 is the obvious counterpart in
 // the same scheme. The phone names whatever is still missing, so iterate on it.
-const BLE_SOCKET_CLIENT_TX_GUID: GUID =
-    GUID::from_u128(0x0000_0100_0004_1000_8000_001a11000101);
-const BLE_SOCKET_SERVER_TX_GUID: GUID =
-    GUID::from_u128(0x0000_0100_0004_1000_8000_001a11000102);
+const BLE_SOCKET_CLIENT_TX_GUID: GUID = GUID::from_u128(0x0000_0100_0004_1000_8000_001a11000101);
+const BLE_SOCKET_SERVER_TX_GUID: GUID = GUID::from_u128(0x0000_0100_0004_1000_8000_001a11000102);
 
 /// Send a Weave ConnectionConfirm notification, retrying on non-Success delivery.
 ///
@@ -196,11 +194,9 @@ impl BleReceiverAdvertiser {
         let handler_inbound = inbound_slot.clone();
         let handler_down = down_slot.clone();
         // Signalled by the write handler when a Weave ConnectionRequest arrives.
-        let (new_session_tx, mut new_session_rx) =
-            tokio::sync::mpsc::unbounded_channel::<()>();
+        let (new_session_tx, mut new_session_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
-        let (outbound_tx, mut outbound_rx) =
-            tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
         // Time spent *inside* the WinRT write callback, accumulated rather than
         // logged per packet. This is the measurement that decides whether the
@@ -261,443 +257,443 @@ impl BleReceiverAdvertiser {
 
         // Supervisor: build a fresh session for every Weave connection.
         tokio::spawn(async move {
-        while new_session_rx.recv().await.is_some() {
-            info!("{INNER_NAME}: new Weave connection, starting a fresh session");
+            while new_session_rx.recv().await.is_some() {
+                info!("{INNER_NAME}: new Weave connection, starting a fresh session");
 
-            let (inbound_tx, mut inbound_rx) =
-                tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-            let (down_tx, mut down_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-            let (upgrade_tx, mut upgrade_rx) =
-                tokio::sync::mpsc::unbounded_channel::<tokio::net::TcpStream>();
-            let (switch_tx, mut switch_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-            let (mut ours, theirs) = tokio::io::duplex(256 * 1024);
+                let (inbound_tx, mut inbound_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+                let (down_tx, mut down_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+                let (upgrade_tx, mut upgrade_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<tokio::net::TcpStream>();
+                let (switch_tx, mut switch_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+                let (mut ours, theirs) = tokio::io::duplex(256 * 1024);
 
-            // Route the write handler at this session. The previous one's
-            // receiver is dropped with it, so anything still in flight for the
-            // old session is discarded rather than mixed into this one.
-            if let Ok(mut slot) = inbound_slot.lock() {
-                *slot = Some(inbound_tx);
-            }
-            if let Ok(mut slot) = down_slot.lock() {
-                *slot = Some(down_tx);
-            }
+                // Route the write handler at this session. The previous one's
+                // receiver is dropped with it, so anything still in flight for the
+                // old session is discarded rather than mixed into this one.
+                if let Ok(mut slot) = inbound_slot.lock() {
+                    *slot = Some(inbound_tx);
+                }
+                if let Ok(mut slot) = down_slot.lock() {
+                    *slot = Some(down_tx);
+                }
 
-            let outbound_tx = session_outbound_tx.clone();
-            let pump_us = pump_us.clone();
-            let pump_calls = pump_calls.clone();
-            let pump_pending = pump_pending.clone();
-            let pump_drained = pump_drained.clone();
-            let msg_sender = session_sender.clone();
-            let ui_sender = session_sender.clone();
-            let end_recycle = session_recycle.clone();
-            // The session task waits for its own last frames to be confirmed
-            // before releasing the link - see the recycle below.
-            let end_pending = pump_pending.clone();
-            let end_drained = pump_drained.clone();
+                let outbound_tx = session_outbound_tx.clone();
+                let pump_us = pump_us.clone();
+                let pump_calls = pump_calls.clone();
+                let pump_pending = pump_pending.clone();
+                let pump_drained = pump_drained.clone();
+                let msg_sender = session_sender.clone();
+                let ui_sender = session_sender.clone();
+                let end_recycle = session_recycle.clone();
+                // The session task waits for its own last frames to be confirmed
+                // before releasing the link - see the recycle below.
+                let end_pending = pump_pending.clone();
+                let end_drained = pump_drained.clone();
 
-        tokio::spawn(async move {
-            // Off the radio while we receive: a concurrent BLE scan starves the
-            // connection. Released when this session ends, whatever ends it.
-            let _pause = crate::hdl::DiscoveryPause::new();
+                tokio::spawn(async move {
+                    // Off the radio while we receive: a concurrent BLE scan starves the
+                    // connection. Released when this session ends, whatever ends it.
+                    let _pause = crate::hdl::DiscoveryPause::new();
 
-            let mut request =
-                super::InboundRequest::new(theirs, "ble".to_string(), msg_sender);
-            request.set_upgrade_sink(upgrade_tx, switch_tx);
+                    let mut request =
+                        super::InboundRequest::new(theirs, "ble".to_string(), msg_sender);
+                    request.set_upgrade_sink(upgrade_tx, switch_tx);
 
-            // `handle()` services exactly **one** frame and returns; the caller
-            // owns the loop (see TcpServer). Calling it once ends the task after
-            // the ConnectionRequest, which drops our end of the duplex - the
-            // pump then sees EOF and every later Weave message is discarded.
-            loop {
-                match request.handle().await {
-                    Ok(()) => {}
-                    Err(e) => {
-                        match e.downcast_ref() {
-                            Some(crate::errors::AppError::NotAnError) => {
-                                info!("{INNER_NAME}: BLE session closed normally");
-                            }
-                            // Report the state machine's position too: the same
-                            // error text means different things at different
-                            // points in the handshake.
-                            _ => {
-                                warn!(
+                    // `handle()` services exactly **one** frame and returns; the caller
+                    // owns the loop (see TcpServer). Calling it once ends the task after
+                    // the ConnectionRequest, which drops our end of the duplex - the
+                    // pump then sees EOF and every later Weave message is discarded.
+                    loop {
+                        match request.handle().await {
+                            Ok(()) => {}
+                            Err(e) => {
+                                match e.downcast_ref() {
+                                    Some(crate::errors::AppError::NotAnError) => {
+                                        info!("{INNER_NAME}: BLE session closed normally");
+                                    }
+                                    // Report the state machine's position too: the same
+                                    // error text means different things at different
+                                    // points in the handshake.
+                                    _ => {
+                                        warn!(
                                     "{INNER_NAME}: BLE InboundRequest ended in state {:?}: {e}",
                                     request.state.state
                                 );
-                                // Tell the UI. The TCP path does this in
-                                // manager.rs; without it a failed BLE transfer
-                                // leaves its card frozen mid-progress forever,
-                                // which reads as a hang rather than a failure.
-                                if request.state.state != crate::hdl::State::Finished {
-                                    let _ = ui_sender.send(crate::channel::ChannelMessage {
+                                        // Tell the UI. The TCP path does this in
+                                        // manager.rs; without it a failed BLE transfer
+                                        // leaves its card frozen mid-progress forever,
+                                        // which reads as a hang rather than a failure.
+                                        if request.state.state != crate::hdl::State::Finished {
+                                            let _ = ui_sender.send(crate::channel::ChannelMessage {
                                         id: "ble".to_string(),
                                         direction: crate::channel::ChannelDirection::LibToFront,
                                         state: Some(crate::hdl::State::Disconnected),
                                         ..Default::default()
                                     });
+                                        }
+                                    }
                                 }
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-            // Let the peer finish its side before dropping the link.
-            //
-            // Recycling immediately cut the connection while the phone was still
-            // completing the transfer: the PC had the whole file and the phone
-            // sat on "sending" forever, because it never saw the end of the
-            // exchange. That was patched with a flat 5s guess; the exact
-            // condition is "our final frames have been confirmed", which is
-            // precisely what the drained signal means. Wait for the event, not
-            // the clock - it releases the link as soon as the peer has really
-            // caught up, and waits longer than 5s if this link is slow.
-            //
-            // Registered before reading the counter so a drain in the gap can't
-            // be missed. The 10s bound only stops us hanging if the sender never
-            // drains; it does not choose a different course.
-            let drained = end_drained.notified();
-            tokio::pin!(drained);
-            drained.as_mut().enable();
-            if end_pending.load(std::sync::atomic::Ordering::Relaxed) > 0 {
-                let _ =
-                    tokio::time::timeout(std::time::Duration::from_secs(10), drained).await;
-            }
-            // Drop the peer's GATT connection, so the next transfer - in either
-            // direction - starts from a clean link.
-            end_recycle.store(true, std::sync::atomic::Ordering::Relaxed);
-        });
-
-        // Pump: reassembled Weave messages in, framed replies out.
-        tokio::spawn(async move {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
-            let mut pending = Vec::new();
-            // Throughput accounting. Lives here rather than in the WinRT write
-            // callback so measuring the receive path doesn't slow it down -
-            // which is the exact mistake that made transfers fail.
-            let mut rx_bytes: u64 = 0;
-            let mut rx_frames: u64 = 0;
-            let mut win_bytes: u64 = 0;
-            let mut last_report = std::time::Instant::now();
-            // Held between CLIENT_INTRODUCTION_ACK and SAFE_TO_CLOSE_PRIOR_CHANNEL.
-            let mut upgraded: Option<tokio::net::TcpStream> = None;
-            loop {
-                tokio::select! {
-                    Some(msg) = inbound_rx.recv() => {
-                        // `fc 9f 5e` = NearbySharing data; the remainder is
-                        // exactly the [u32 len][OfflineFrame] the TCP path reads.
-                        // `00 00 00` = multiplex control, not for InboundRequest.
-                        if msg.len() > 3 && msg[..3] == [0xfc, 0x9f, 0x5e] {
-                            // Sanity-check the framing: the [u32 len][frame] must
-                            // consume the message exactly. Any mismatch desyncs
-                            // the stream and InboundRequest blocks forever on a
-                            // garbage length, so surface it loudly.
-                            let body = &msg[3..];
-                            if body.len() >= 4 {
-                                let declared = u32::from_be_bytes(
-                                    [body[0], body[1], body[2], body[3]],
-                                ) as usize;
-                                if declared + 4 != body.len() {
-                                    warn!(
-                                        "{INNER_NAME}: FRAMING MISMATCH - declared {declared} + 4 \
-                                         != body {} (msg {} B). Trailing {} B: {:02x?}",
-                                        body.len(),
-                                        msg.len(),
-                                        body.len().saturating_sub(declared + 4),
-                                        &body[(declared + 4).min(body.len())..],
-                                    );
-                                } else {
-                                    trace!("{INNER_NAME}: -> InboundRequest {} B frame", declared);
-                                }
-                            }
-                            rx_frames += 1;
-                            rx_bytes += body.len() as u64;
-                            win_bytes += body.len() as u64;
-                            let elapsed = last_report.elapsed();
-                            if elapsed >= std::time::Duration::from_secs(5) {
-                                use std::sync::atomic::Ordering::Relaxed;
-                                let calls = pump_calls.swap(0, Relaxed);
-                                let us = pump_us.swap(0, Relaxed);
-                                // `in handler` is the share of wall-clock time we
-                                // actually spend processing a write. If it is a
-                                // few percent, the gap between packets is the
-                                // link (connection interval) and no amount of
-                                // optimising our code will help.
-                                let mean_us = if calls > 0 { us / calls } else { 0 };
-                                let busy = us as f64 / elapsed.as_micros() as f64 * 100.0;
-                                info!(
-                                    "{INNER_NAME}: BLE rx {:.1} KB/s ({rx_frames} frames, \
-                                     {:.0} KB total) - handler {mean_us} us mean over \
-                                     {calls} writes, {busy:.1}% busy",
-                                    win_bytes as f64 / 1024.0 / elapsed.as_secs_f64(),
-                                    rx_bytes as f64 / 1024.0,
-                                );
-                                win_bytes = 0;
-                                last_report = std::time::Instant::now();
-                            }
-                            if ours.write_all(body).await.is_err() {
                                 break;
                             }
-                        } else {
-                            info!("{INNER_NAME}: multiplex control {:02x?}", &msg[..msg.len().min(24)]);
                         }
                     }
-                    n = ours.read_buf(&mut pending) => {
-                        match n {
-                            Ok(0) | Err(_) => break,
-                            Ok(_) => {
-                                // Split the outgoing byte stream back into whole
-                                // [u32 len][frame] messages so each can carry the
-                                // service hash.
-                                while pending.len() >= 4 {
-                                    let len = u32::from_be_bytes(
-                                        [pending[0], pending[1], pending[2], pending[3]],
-                                    ) as usize;
-                                    if pending.len() < 4 + len {
-                                        break;
-                                    }
-                                    let mut out = Vec::with_capacity(3 + 4 + len);
-                                    out.extend_from_slice(&[0xfc, 0x9f, 0x5e]);
-                                    out.extend_from_slice(&pending[..4 + len]);
-                                    pending.drain(..4 + len);
-                                    if outbound_tx.send(out).is_err() {
-                                        return;
-                                    }
-                                }
-                            }
-                        }
+                    // Let the peer finish its side before dropping the link.
+                    //
+                    // Recycling immediately cut the connection while the phone was still
+                    // completing the transfer: the PC had the whole file and the phone
+                    // sat on "sending" forever, because it never saw the end of the
+                    // exchange. That was patched with a flat 5s guess; the exact
+                    // condition is "our final frames have been confirmed", which is
+                    // precisely what the drained signal means. Wait for the event, not
+                    // the clock - it releases the link as soon as the peer has really
+                    // caught up, and waits longer than 5s if this link is slow.
+                    //
+                    // Registered before reading the counter so a drain in the gap can't
+                    // be missed. The 10s bound only stops us hanging if the sender never
+                    // drains; it does not choose a different course.
+                    let drained = end_drained.notified();
+                    tokio::pin!(drained);
+                    drained.as_mut().enable();
+                    if end_pending.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                        let _ =
+                            tokio::time::timeout(std::time::Duration::from_secs(10), drained).await;
                     }
-                    Some(sock) = upgrade_rx.recv() => {
-                        // Arrives at CLIENT_INTRODUCTION_ACK. Hold it: the phone
-                        // still has LAST_WRITE_TO_PRIOR_CHANNEL to send over BLE
-                        // and waits for our SAFE_TO_CLOSE_PRIOR_CHANNEL before
-                        // it will use this socket. Switching here tore the BLE
-                        // bridge down under that exchange and the phone
-                        // cancelled the transfer.
-                        info!("{INNER_NAME}: upgraded socket ready, holding for SAFE_TO_CLOSE");
-                        upgraded = Some(sock);
-                    }
-                    Some(_) = switch_rx.recv() => {
-                        // SAFE_TO_CLOSE_PRIOR_CHANNEL has gone out; the old
-                        // channel is finished with.
-                        match upgraded.take() {
-                            Some(mut sock) => {
-                                // First flush anything InboundRequest has
-                                // written but we have not pumped yet.
-                                //
-                                // SAFE_TO_CLOSE goes into the duplex, and the
-                                // switch is signalled on a *separate* channel
-                                // immediately afterwards - so the signal can
-                                // beat the bytes here. On a LAN upgrade, where
-                                // the whole exchange takes under a second, it
-                                // does: `prior channel drained` fired in the
-                                // same second as the connection because nothing
-                                // had been queued yet, we broke out of the pump,
-                                // and SAFE_TO_CLOSE was left unsent in the
-                                // duplex. The peer then waited forever for a
-                                // frame we still held.
-                                loop {
-                                    let mut buf = [0u8; 8192];
-                                    match tokio::time::timeout(
-                                        std::time::Duration::from_millis(200),
-                                        ours.read(&mut buf),
-                                    )
-                                    .await
-                                    {
-                                        Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
-                                        Ok(Ok(n)) => pending.extend_from_slice(&buf[..n]),
-                                    }
-                                }
-                                while pending.len() >= 4 {
-                                    let len = u32::from_be_bytes([
-                                        pending[0], pending[1], pending[2], pending[3],
-                                    ]) as usize;
-                                    if pending.len() < 4 + len {
-                                        break;
-                                    }
-                                    let mut out = Vec::with_capacity(3 + 4 + len);
-                                    out.extend_from_slice(&[0xfc, 0x9f, 0x5e]);
-                                    out.extend_from_slice(&pending[..4 + len]);
-                                    pending.drain(..4 + len);
-                                    if outbound_tx.send(out).is_err() {
-                                        break;
-                                    }
-                                }
+                    // Drop the peer's GATT connection, so the next transfer - in either
+                    // direction - starts from a clean link.
+                    end_recycle.store(true, std::sync::atomic::Ordering::Relaxed);
+                });
 
-                                // Close the multiplex service channel, the same
-                                // way the send path does - this direction was
-                                // missing it.
-                                //
-                                // The phone can finish the whole upgrade
-                                // handshake and then send nothing over the
-                                // hotspot: measured here as "nothing on the
-                                // upgraded socket within 45s", with the phone
-                                // having connected and introduced itself over
-                                // that very socket, so it is reachable and simply
-                                // not sending. Its sender waits for the BLE
-                                // service channel to close before committing to
-                                // the new medium - the mirror of the reader
-                                // behaviour that stranded PC->phone until we
-                                // closed the channel there (see blea_send.rs).
-                                //
-                                // We host the GATT server, so we close the
-                                // channel by *notifying* the DISCONNECT rather
-                                // than writing it: queue it on outbound_tx now so
-                                // it rides out in the same drain as SAFE_TO_CLOSE,
-                                // before the switch. 00 00 00 = multiplex
-                                // control; 08 02 1a 05 0a 03 <hash> = disconnect
-                                // the named service; fc 9f 5e is this session's
-                                // service hash, the one used for data framing
-                                // above.
-                                let disconnect = vec![
-                                    0x00, 0x00, 0x00, 0x08, 0x02, 0x1a, 0x05, 0x0a, 0x03, 0xfc,
-                                    0x9f, 0x5e,
-                                ];
-                                if outbound_tx.send(disconnect).is_err() {
-                                    warn!(
-                                        "{INNER_NAME}: could not queue the multiplex channel close"
-                                    );
-                                } else {
-                                    info!(
-                                        "{INNER_NAME}: queued multiplex channel close for \
-                                         [fc, 9f, 5e]"
-                                    );
-                                }
-
-                                // Then wait for it to actually reach the peer.
-                                // It is only queued at this point, and on a
-                                // congested BLE link that is tens of seconds
-                                // apart - the peer will not use the new socket
-                                // until it has it.
-
-                                // Give it a moment to go out, but do not wait on
-                                // confirmation.
-                                //
-                                // Waiting for the indication to be *confirmed*
-                                // stalls forever on the LAN path: once the peer
-                                // has the new socket it stops servicing BLE, so
-                                // that confirmation may never come. It is also
-                                // unnecessary - the sender thread drains its
-                                // queue independently of this pump, so once
-                                // SAFE_TO_CLOSE is queued it goes out whether we
-                                // are still here or not. Queueing it was the
-                                // part that was actually missing.
-                                //
-                                // Wait on the drained signal, not a tick.
-                                //
-                                // The waiter is registered *before* reading the
-                                // counter: otherwise the sender could drain in
-                                // the gap between the check and the await, the
-                                // wakeup would be missed, and we'd sit out the
-                                // full timeout. The 3s bound is a safety net
-                                // only - if the sender never drains we proceed
-                                // anyway rather than hang, and it never selects
-                                // a different strategy.
-                                let drained = pump_drained.notified();
-                                tokio::pin!(drained);
-                                drained.as_mut().enable();
-                                if pump_pending.load(std::sync::atomic::Ordering::Relaxed) > 0 {
-                                    let _ = tokio::time::timeout(
-                                        std::time::Duration::from_secs(3),
-                                        drained,
-                                    )
-                                    .await;
-                                }
-                                info!(
-                                    "{INNER_NAME}: prior channel released ({} packet(s) still \
-                                     queued, the sender thread will finish them)",
-                                    pump_pending.load(std::sync::atomic::Ordering::Relaxed)
-                                );
-
-                                // Splice rather than translate: what the phone
-                                // writes here is already [u32 len][frame],
-                                // exactly what the far side of the duplex reads.
-                                // Only the Weave and multiplex wrappers were ever
-                                // BLE-specific, so the encrypted stream - keys,
-                                // sequence numbers - carries straight over.
-                                info!(
-                                    "{INNER_NAME}: switching the stream onto the upgraded socket"
-                                );
-
-                                // The peer has occasionally completed the whole
-                                // upgrade handshake and then sent nothing at
-                                // all. `copy_bidirectional` waits forever on
-                                // that, so the transfer hangs at whatever
-                                // percentage it reached with not one line in the
-                                // log - indistinguishable from a crash. Require
-                                // the first byte within 20s; a peer that
-                                // switched mediums and meant it starts
-                                // immediately.
-                                let mut first = [0u8; 8192];
-                                let n = match tokio::time::timeout(
-                                    std::time::Duration::from_secs(45),
-                                    sock.read(&mut first),
-                                )
-                                .await
-                                {
-                                    Ok(Ok(0)) => {
-                                        warn!(
-                                            "{INNER_NAME}: peer closed the upgraded socket without \
-                                             sending anything"
-                                        );
-                                        break;
+                // Pump: reassembled Weave messages in, framed replies out.
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut pending = Vec::new();
+                    // Throughput accounting. Lives here rather than in the WinRT write
+                    // callback so measuring the receive path doesn't slow it down -
+                    // which is the exact mistake that made transfers fail.
+                    let mut rx_bytes: u64 = 0;
+                    let mut rx_frames: u64 = 0;
+                    let mut win_bytes: u64 = 0;
+                    let mut last_report = std::time::Instant::now();
+                    // Held between CLIENT_INTRODUCTION_ACK and SAFE_TO_CLOSE_PRIOR_CHANNEL.
+                    let mut upgraded: Option<tokio::net::TcpStream> = None;
+                    loop {
+                        tokio::select! {
+                            Some(msg) = inbound_rx.recv() => {
+                                // `fc 9f 5e` = NearbySharing data; the remainder is
+                                // exactly the [u32 len][OfflineFrame] the TCP path reads.
+                                // `00 00 00` = multiplex control, not for InboundRequest.
+                                if msg.len() > 3 && msg[..3] == [0xfc, 0x9f, 0x5e] {
+                                    // Sanity-check the framing: the [u32 len][frame] must
+                                    // consume the message exactly. Any mismatch desyncs
+                                    // the stream and InboundRequest blocks forever on a
+                                    // garbage length, so surface it loudly.
+                                    let body = &msg[3..];
+                                    if body.len() >= 4 {
+                                        let declared = u32::from_be_bytes(
+                                            [body[0], body[1], body[2], body[3]],
+                                        ) as usize;
+                                        if declared + 4 != body.len() {
+                                            warn!(
+                                                "{INNER_NAME}: FRAMING MISMATCH - declared {declared} + 4 \
+                                                 != body {} (msg {} B). Trailing {} B: {:02x?}",
+                                                body.len(),
+                                                msg.len(),
+                                                body.len().saturating_sub(declared + 4),
+                                                &body[(declared + 4).min(body.len())..],
+                                            );
+                                        } else {
+                                            trace!("{INNER_NAME}: -> InboundRequest {} B frame", declared);
+                                        }
                                     }
-                                    Ok(Ok(n)) => n,
-                                    Ok(Err(e)) => {
-                                        warn!("{INNER_NAME}: upgraded socket failed: {e}");
-                                        break;
-                                    }
-                                    Err(_) => {
-                                        warn!(
-                                            "{INNER_NAME}: nothing on the upgraded socket within \
-                                             45s of the prior channel draining"
-                                        );
-                                        break;
-                                    }
-                                };
-                                if ours.write_all(&first[..n]).await.is_err() {
-                                    break;
-                                }
-
-                                match tokio::io::copy_bidirectional(&mut sock, &mut ours).await {
-                                    Ok((from_phone, to_phone)) => info!(
-                                        "{INNER_NAME}: upgraded socket closed ({from_phone} B in, \
-                                         {to_phone} B out)"
-                                    ),
-                                    // The phone slams the socket shut the
-                                    // moment the transfer completes rather than
-                                    // closing it cleanly, so a reset here is the
-                                    // normal ending, not a fault.
-                                    Err(e)
-                                        if matches!(
-                                            e.kind(),
-                                            std::io::ErrorKind::ConnectionReset
-                                                | std::io::ErrorKind::ConnectionAborted
-                                        ) =>
-                                    {
+                                    rx_frames += 1;
+                                    rx_bytes += body.len() as u64;
+                                    win_bytes += body.len() as u64;
+                                    let elapsed = last_report.elapsed();
+                                    if elapsed >= std::time::Duration::from_secs(5) {
+                                        use std::sync::atomic::Ordering::Relaxed;
+                                        let calls = pump_calls.swap(0, Relaxed);
+                                        let us = pump_us.swap(0, Relaxed);
+                                        // `in handler` is the share of wall-clock time we
+                                        // actually spend processing a write. If it is a
+                                        // few percent, the gap between packets is the
+                                        // link (connection interval) and no amount of
+                                        // optimising our code will help.
+                                        let mean_us = if calls > 0 { us / calls } else { 0 };
+                                        let busy = us as f64 / elapsed.as_micros() as f64 * 100.0;
                                         info!(
-                                            "{INNER_NAME}: phone closed the upgraded socket ({e})"
+                                            "{INNER_NAME}: BLE rx {:.1} KB/s ({rx_frames} frames, \
+                                             {:.0} KB total) - handler {mean_us} us mean over \
+                                             {calls} writes, {busy:.1}% busy",
+                                            win_bytes as f64 / 1024.0 / elapsed.as_secs_f64(),
+                                            rx_bytes as f64 / 1024.0,
                                         );
+                                        win_bytes = 0;
+                                        last_report = std::time::Instant::now();
                                     }
-                                    Err(e) => warn!("{INNER_NAME}: upgraded socket failed: {e}"),
+                                    if ours.write_all(body).await.is_err() {
+                                        break;
+                                    }
+                                } else {
+                                    info!("{INNER_NAME}: multiplex control {:02x?}", &msg[..msg.len().min(24)]);
                                 }
+                            }
+                            n = ours.read_buf(&mut pending) => {
+                                match n {
+                                    Ok(0) | Err(_) => break,
+                                    Ok(_) => {
+                                        // Split the outgoing byte stream back into whole
+                                        // [u32 len][frame] messages so each can carry the
+                                        // service hash.
+                                        while pending.len() >= 4 {
+                                            let len = u32::from_be_bytes(
+                                                [pending[0], pending[1], pending[2], pending[3]],
+                                            ) as usize;
+                                            if pending.len() < 4 + len {
+                                                break;
+                                            }
+                                            let mut out = Vec::with_capacity(3 + 4 + len);
+                                            out.extend_from_slice(&[0xfc, 0x9f, 0x5e]);
+                                            out.extend_from_slice(&pending[..4 + len]);
+                                            pending.drain(..4 + len);
+                                            if outbound_tx.send(out).is_err() {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Some(sock) = upgrade_rx.recv() => {
+                                // Arrives at CLIENT_INTRODUCTION_ACK. Hold it: the phone
+                                // still has LAST_WRITE_TO_PRIOR_CHANNEL to send over BLE
+                                // and waits for our SAFE_TO_CLOSE_PRIOR_CHANNEL before
+                                // it will use this socket. Switching here tore the BLE
+                                // bridge down under that exchange and the phone
+                                // cancelled the transfer.
+                                info!("{INNER_NAME}: upgraded socket ready, holding for SAFE_TO_CLOSE");
+                                upgraded = Some(sock);
+                            }
+                            Some(_) = switch_rx.recv() => {
+                                // SAFE_TO_CLOSE_PRIOR_CHANNEL has gone out; the old
+                                // channel is finished with.
+                                match upgraded.take() {
+                                    Some(mut sock) => {
+                                        // First flush anything InboundRequest has
+                                        // written but we have not pumped yet.
+                                        //
+                                        // SAFE_TO_CLOSE goes into the duplex, and the
+                                        // switch is signalled on a *separate* channel
+                                        // immediately afterwards - so the signal can
+                                        // beat the bytes here. On a LAN upgrade, where
+                                        // the whole exchange takes under a second, it
+                                        // does: `prior channel drained` fired in the
+                                        // same second as the connection because nothing
+                                        // had been queued yet, we broke out of the pump,
+                                        // and SAFE_TO_CLOSE was left unsent in the
+                                        // duplex. The peer then waited forever for a
+                                        // frame we still held.
+                                        loop {
+                                            let mut buf = [0u8; 8192];
+                                            match tokio::time::timeout(
+                                                std::time::Duration::from_millis(200),
+                                                ours.read(&mut buf),
+                                            )
+                                            .await
+                                            {
+                                                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                                                Ok(Ok(n)) => pending.extend_from_slice(&buf[..n]),
+                                            }
+                                        }
+                                        while pending.len() >= 4 {
+                                            let len = u32::from_be_bytes([
+                                                pending[0], pending[1], pending[2], pending[3],
+                                            ]) as usize;
+                                            if pending.len() < 4 + len {
+                                                break;
+                                            }
+                                            let mut out = Vec::with_capacity(3 + 4 + len);
+                                            out.extend_from_slice(&[0xfc, 0x9f, 0x5e]);
+                                            out.extend_from_slice(&pending[..4 + len]);
+                                            pending.drain(..4 + len);
+                                            if outbound_tx.send(out).is_err() {
+                                                break;
+                                            }
+                                        }
+
+                                        // Close the multiplex service channel, the same
+                                        // way the send path does - this direction was
+                                        // missing it.
+                                        //
+                                        // The phone can finish the whole upgrade
+                                        // handshake and then send nothing over the
+                                        // hotspot: measured here as "nothing on the
+                                        // upgraded socket within 45s", with the phone
+                                        // having connected and introduced itself over
+                                        // that very socket, so it is reachable and simply
+                                        // not sending. Its sender waits for the BLE
+                                        // service channel to close before committing to
+                                        // the new medium - the mirror of the reader
+                                        // behaviour that stranded PC->phone until we
+                                        // closed the channel there (see blea_send.rs).
+                                        //
+                                        // We host the GATT server, so we close the
+                                        // channel by *notifying* the DISCONNECT rather
+                                        // than writing it: queue it on outbound_tx now so
+                                        // it rides out in the same drain as SAFE_TO_CLOSE,
+                                        // before the switch. 00 00 00 = multiplex
+                                        // control; 08 02 1a 05 0a 03 <hash> = disconnect
+                                        // the named service; fc 9f 5e is this session's
+                                        // service hash, the one used for data framing
+                                        // above.
+                                        let disconnect = vec![
+                                            0x00, 0x00, 0x00, 0x08, 0x02, 0x1a, 0x05, 0x0a, 0x03, 0xfc,
+                                            0x9f, 0x5e,
+                                        ];
+                                        if outbound_tx.send(disconnect).is_err() {
+                                            warn!(
+                                                "{INNER_NAME}: could not queue the multiplex channel close"
+                                            );
+                                        } else {
+                                            info!(
+                                                "{INNER_NAME}: queued multiplex channel close for \
+                                                 [fc, 9f, 5e]"
+                                            );
+                                        }
+
+                                        // Then wait for it to actually reach the peer.
+                                        // It is only queued at this point, and on a
+                                        // congested BLE link that is tens of seconds
+                                        // apart - the peer will not use the new socket
+                                        // until it has it.
+
+                                        // Give it a moment to go out, but do not wait on
+                                        // confirmation.
+                                        //
+                                        // Waiting for the indication to be *confirmed*
+                                        // stalls forever on the LAN path: once the peer
+                                        // has the new socket it stops servicing BLE, so
+                                        // that confirmation may never come. It is also
+                                        // unnecessary - the sender thread drains its
+                                        // queue independently of this pump, so once
+                                        // SAFE_TO_CLOSE is queued it goes out whether we
+                                        // are still here or not. Queueing it was the
+                                        // part that was actually missing.
+                                        //
+                                        // Wait on the drained signal, not a tick.
+                                        //
+                                        // The waiter is registered *before* reading the
+                                        // counter: otherwise the sender could drain in
+                                        // the gap between the check and the await, the
+                                        // wakeup would be missed, and we'd sit out the
+                                        // full timeout. The 3s bound is a safety net
+                                        // only - if the sender never drains we proceed
+                                        // anyway rather than hang, and it never selects
+                                        // a different strategy.
+                                        let drained = pump_drained.notified();
+                                        tokio::pin!(drained);
+                                        drained.as_mut().enable();
+                                        if pump_pending.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+                                            let _ = tokio::time::timeout(
+                                                std::time::Duration::from_secs(3),
+                                                drained,
+                                            )
+                                            .await;
+                                        }
+                                        info!(
+                                            "{INNER_NAME}: prior channel released ({} packet(s) still \
+                                             queued, the sender thread will finish them)",
+                                            pump_pending.load(std::sync::atomic::Ordering::Relaxed)
+                                        );
+
+                                        // Splice rather than translate: what the phone
+                                        // writes here is already [u32 len][frame],
+                                        // exactly what the far side of the duplex reads.
+                                        // Only the Weave and multiplex wrappers were ever
+                                        // BLE-specific, so the encrypted stream - keys,
+                                        // sequence numbers - carries straight over.
+                                        info!(
+                                            "{INNER_NAME}: switching the stream onto the upgraded socket"
+                                        );
+
+                                        // The peer has occasionally completed the whole
+                                        // upgrade handshake and then sent nothing at
+                                        // all. `copy_bidirectional` waits forever on
+                                        // that, so the transfer hangs at whatever
+                                        // percentage it reached with not one line in the
+                                        // log - indistinguishable from a crash. Require
+                                        // the first byte within 20s; a peer that
+                                        // switched mediums and meant it starts
+                                        // immediately.
+                                        let mut first = [0u8; 8192];
+                                        let n = match tokio::time::timeout(
+                                            std::time::Duration::from_secs(45),
+                                            sock.read(&mut first),
+                                        )
+                                        .await
+                                        {
+                                            Ok(Ok(0)) => {
+                                                warn!(
+                                                    "{INNER_NAME}: peer closed the upgraded socket without \
+                                                     sending anything"
+                                                );
+                                                break;
+                                            }
+                                            Ok(Ok(n)) => n,
+                                            Ok(Err(e)) => {
+                                                warn!("{INNER_NAME}: upgraded socket failed: {e}");
+                                                break;
+                                            }
+                                            Err(_) => {
+                                                warn!(
+                                                    "{INNER_NAME}: nothing on the upgraded socket within \
+                                                     45s of the prior channel draining"
+                                                );
+                                                break;
+                                            }
+                                        };
+                                        if ours.write_all(&first[..n]).await.is_err() {
+                                            break;
+                                        }
+
+                                        match tokio::io::copy_bidirectional(&mut sock, &mut ours).await {
+                                            Ok((from_phone, to_phone)) => info!(
+                                                "{INNER_NAME}: upgraded socket closed ({from_phone} B in, \
+                                                 {to_phone} B out)"
+                                            ),
+                                            // The phone slams the socket shut the
+                                            // moment the transfer completes rather than
+                                            // closing it cleanly, so a reset here is the
+                                            // normal ending, not a fault.
+                                            Err(e)
+                                                if matches!(
+                                                    e.kind(),
+                                                    std::io::ErrorKind::ConnectionReset
+                                                        | std::io::ErrorKind::ConnectionAborted
+                                                ) =>
+                                            {
+                                                info!(
+                                                    "{INNER_NAME}: phone closed the upgraded socket ({e})"
+                                                );
+                                            }
+                                            Err(e) => warn!("{INNER_NAME}: upgraded socket failed: {e}"),
+                                        }
+                                        break;
+                                    }
+                                    None => warn!(
+                                        "{INNER_NAME}: asked to switch but no upgraded socket arrived"
+                                    ),
+                                }
+                            }
+                            _ = down_rx.recv() => {
+                                warn!("{INNER_NAME}: BLE link dropped, tearing the bridge down");
                                 break;
                             }
-                            None => warn!(
-                                "{INNER_NAME}: asked to switch but no upgraded socket arrived"
-                            ),
+                            else => break,
                         }
                     }
-                    _ = down_rx.recv() => {
-                        warn!("{INNER_NAME}: BLE link dropped, tearing the bridge down");
-                        break;
-                    }
-                    else => break,
-                }
+                    info!("{INNER_NAME}: bridge pump exited");
+                });
             }
-            info!("{INNER_NAME}: bridge pump exited");
-        });
-        }
         });
 
         tokio::task::spawn_blocking(move || -> Result<(), anyhow::Error> {

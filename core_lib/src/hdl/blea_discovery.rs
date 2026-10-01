@@ -83,10 +83,7 @@ fn already_listed(name: &str) -> bool {
 
 /// The peripheral discovery found at this address, if it is still known.
 pub fn discovered_peripheral(address: &str) -> Option<btleplug::platform::Peripheral> {
-    DISCOVERED
-        .lock()
-        .ok()
-        .and_then(|m| m.get(address).cloned())
+    DISCOVERED.lock().ok().and_then(|m| m.get(address).cloned())
 }
 
 /// The device name we listed this address under, if any.

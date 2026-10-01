@@ -139,8 +139,7 @@ async fn loopback_handshake_keys_are_session_unique() {
 // ---------------------------------------------------------------------------
 
 /// SHA-256 of the ECDH shared secret for that session.
-const KAT_DERIVED_SECRET: &str =
-    "f641f2dec33098baa9f2c9be5ea4af173e42023c07e44e129fa9eb8cf884446c";
+const KAT_DERIVED_SECRET: &str = "f641f2dec33098baa9f2c9be5ea4af173e42023c07e44e129fa9eb8cf884446c";
 
 /// The client init frame followed by the server init frame, as they went over
 /// the wire.
@@ -235,8 +234,7 @@ fn kat_decrypts_a_frame_the_pixel_encrypted() {
     assert_eq!(d2d.sequence_number(), 1);
 
     // The body must be a decodable offline frame, not merely non-garbage.
-    let offline =
-        crate::location_nearby_connections::OfflineFrame::decode(d2d.message()).unwrap();
+    let offline = crate::location_nearby_connections::OfflineFrame::decode(d2d.message()).unwrap();
     assert_eq!(
         offline.v1.unwrap().r#type(),
         crate::location_nearby_connections::v1_frame::FrameType::PayloadTransfer

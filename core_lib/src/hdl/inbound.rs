@@ -103,11 +103,17 @@ pub struct InboundRequest<S> {
     /// The BLE bridge sets this and then splices the socket into the stream in
     /// place of the Weave transport; unset elsewhere, where there is nothing to
     /// upgrade from.
-    #[cfg(all(feature = "experimental", any(target_os = "linux", target_os = "windows")))]
+    #[cfg(all(
+        feature = "experimental",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     upgrade_tx: Option<tokio::sync::mpsc::UnboundedSender<tokio::net::TcpStream>>,
     /// Signals the bridge that SAFE_TO_CLOSE_PRIOR_CHANNEL has gone out and the
     /// stream may now move onto the upgraded socket.
-    #[cfg(all(feature = "experimental", any(target_os = "linux", target_os = "windows")))]
+    #[cfg(all(
+        feature = "experimental",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     switch_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
     /// When we last answered a KeepAlive, so redundant responses can be skipped.
     /// Not transport-specific, but it matters on BLE: see the KeepAlive arm.
@@ -137,7 +143,10 @@ pub struct InboundRequest<S> {
     /// the WIFI_LAN and WIFI_HOTSPOT offers can be sent for one transfer, and a
     /// single listener accepts whichever interface the phone reaches us on - so
     /// the second offer must not try to bind the port again.
-    #[cfg(all(feature = "experimental", any(target_os = "linux", target_os = "windows")))]
+    #[cfg(all(
+        feature = "experimental",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     upgrade_listener_started: bool,
 }
 
@@ -173,22 +182,34 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
             prof_write: std::time::Duration::ZERO,
             prof_bytes: 0,
             prof_since: None,
-            #[cfg(all(feature = "experimental", any(target_os = "linux", target_os = "windows")))]
+            #[cfg(all(
+                feature = "experimental",
+                any(target_os = "linux", target_os = "windows")
+            ))]
             upgrade_tx: None,
-            #[cfg(all(feature = "experimental", any(target_os = "linux", target_os = "windows")))]
+            #[cfg(all(
+                feature = "experimental",
+                any(target_os = "linux", target_os = "windows")
+            ))]
             switch_tx: None,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
             hotspot: None,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
             hotspot_creds: None,
-            #[cfg(all(feature = "experimental", any(target_os = "linux", target_os = "windows")))]
+            #[cfg(all(
+                feature = "experimental",
+                any(target_os = "linux", target_os = "windows")
+            ))]
             upgrade_listener_started: false,
         }
     }
 
     /// Where to deliver the upgraded socket once the peer has introduced itself
     /// on it. Only the BLE bridge can adopt one today.
-    #[cfg(all(feature = "experimental", any(target_os = "linux", target_os = "windows")))]
+    #[cfg(all(
+        feature = "experimental",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     pub fn set_upgrade_sink(
         &mut self,
         tx: tokio::sync::mpsc::UnboundedSender<tokio::net::TcpStream>,
@@ -696,21 +717,18 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
         // async executor breaks the in-flight handshake frames - that's what
         // caused the "Missing required fields (ReceivedPairedKeyResult)" failures
         // when the hotspot was first wired in.
-        let (handle, creds) = match tokio::task::spawn_blocking(
-            crate::hdl::WindowsWifiDirect::start,
-        )
-        .await
-        {
-            Ok(Ok(v)) => v,
-            Ok(Err(e)) => {
-                warn!("Bandwidth upgrade: WiFi Direct start failed: {e}");
-                return Ok(());
-            }
-            Err(e) => {
-                warn!("Bandwidth upgrade: WiFi Direct task join failed: {e}");
-                return Ok(());
-            }
-        };
+        let (handle, creds) =
+            match tokio::task::spawn_blocking(crate::hdl::WindowsWifiDirect::start).await {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => {
+                    warn!("Bandwidth upgrade: WiFi Direct start failed: {e}");
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!("Bandwidth upgrade: WiFi Direct task join failed: {e}");
+                    return Ok(());
+                }
+            };
 
         info!(
             "Bandwidth upgrade: WiFi Direct group up (device_name={}, ssid={}, gateway={}, port={})",
@@ -751,10 +769,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
     /// Skips loopback, link-local, and the 192.168.137.0/24 tethering subnet -
     /// that one is our own soft-AP, which a peer already on the LAN cannot reach
     /// and must not be told to use.
-    #[cfg(all(feature = "experimental", any(target_os = "linux", target_os = "windows")))]
+    #[cfg(all(
+        feature = "experimental",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     fn lan_ipv4() -> Option<std::net::Ipv4Addr> {
-        get_if_addrs::get_if_addrs().ok()?.into_iter().find_map(|i| {
-            match i.ip() {
+        get_if_addrs::get_if_addrs()
+            .ok()?
+            .into_iter()
+            .find_map(|i| match i.ip() {
                 std::net::IpAddr::V4(v4)
                     if !v4.is_loopback()
                         && !v4.is_link_local()
@@ -765,8 +788,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
                     Some(v4)
                 }
                 _ => None,
-            }
-        })
+            })
     }
 
     /// Offer WIFI_LAN: the peer is already on our network, so just tell it where
@@ -778,7 +800,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
     /// have to leave its network, which google/nearby refuses), but leaving it
     /// on BLE means 20 KB/s and the ~1 MB indication-timeout wall. Nothing has
     /// to be brought up: the network already exists.
-    #[cfg(all(feature = "experimental", any(target_os = "linux", target_os = "windows")))]
+    #[cfg(all(
+        feature = "experimental",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     async fn offer_wifi_lan_upgrade(&mut self) -> Result<(), anyhow::Error> {
         use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::{
             upgrade_path_info::{Medium, WifiLanSocket},
@@ -833,7 +858,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
     /// whichever interface it reaches us - the LAN one if it is on our network,
     /// the AP one if it is not. Whichever it connects on wins; the other offer
     /// is simply never taken up.
-    #[cfg(all(feature = "experimental", any(target_os = "linux", target_os = "windows")))]
+    #[cfg(all(
+        feature = "experimental",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     async fn offer_upgrade_paths(&mut self) {
         let have_lan = Self::lan_ipv4().is_some();
 
@@ -853,13 +881,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
         }
     }
 
-    #[cfg(not(all(feature = "experimental", any(target_os = "linux", target_os = "windows"))))]
+    #[cfg(not(all(
+        feature = "experimental",
+        any(target_os = "linux", target_os = "windows")
+    )))]
     async fn offer_upgrade_paths(&mut self) {}
 
     /// Accept the upgraded channel on `port`, introduce it, and hand it to the
     /// bridge. Shared by the hotspot and WIFI_LAN offers - only the medium and
     /// credentials differ, never what happens once the peer connects.
-    #[cfg(all(feature = "experimental", any(target_os = "linux", target_os = "windows")))]
+    #[cfg(all(
+        feature = "experimental",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     async fn ensure_upgrade_listener(&mut self, port: u16) {
         // Idempotent: a transfer may offer both WIFI_LAN and WIFI_HOTSPOT, and
         // one listener on 0.0.0.0 accepts the phone on whichever interface it
@@ -874,21 +908,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
             match tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await {
                 Ok(l) => {
                     info!("Bandwidth upgrade: listening on 0.0.0.0:{port}");
-                    let accepted = match tokio::time::timeout(
-                        std::time::Duration::from_secs(45),
-                        l.accept(),
-                    )
-                    .await
-                    {
-                        Ok(r) => r,
-                        Err(_) => {
-                            warn!(
+                    let accepted =
+                        match tokio::time::timeout(std::time::Duration::from_secs(45), l.accept())
+                            .await
+                        {
+                            Ok(r) => r,
+                            Err(_) => {
+                                warn!(
                                 "Bandwidth upgrade: no peer connected within 45s; staying on the \
                                  prior channel"
                             );
-                            return;
-                        }
-                    };
+                                return;
+                            }
+                        };
                     match accepted {
                         Ok((s, addr)) => {
                             info!("*** Bandwidth upgrade: phone connected from {addr} ***");
@@ -1242,7 +1274,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
     // so WIFI_DIRECT is in its set; we were answering with a disjoint claim and
     // then sending UPGRADE_PATH_AVAILABLE(WIFI_DIRECT) for something we'd never
     // said we could do.
-    #[cfg(all(feature = "experimental", any(target_os = "linux", target_os = "windows")))]
+    #[cfg(all(
+        feature = "experimental",
+        any(target_os = "linux", target_os = "windows")
+    ))]
     async fn send_supported_mediums(&mut self) -> Result<(), anyhow::Error> {
         use crate::location_nearby_connections::bandwidth_upgrade_retry_frame::Medium;
         use crate::location_nearby_connections::BandwidthUpgradeRetryFrame;
@@ -1300,7 +1335,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
         Ok(())
     }
 
-    #[cfg(not(all(feature = "experimental", any(target_os = "linux", target_os = "windows"))))]
+    #[cfg(not(all(
+        feature = "experimental",
+        any(target_os = "linux", target_os = "windows")
+    )))]
     async fn send_supported_mediums(&mut self) -> Result<(), anyhow::Error> {
         Ok(())
     }
@@ -1525,9 +1563,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
                                     self.prof_decrypt.as_millis() as f64 / secs,
                                     self.prof_aes.as_millis() as f64 / secs,
                                     self.prof_write.as_millis() as f64 / secs,
-                                    (elapsed.saturating_sub(self.prof_decrypt).saturating_sub(
-                                        self.prof_write
-                                    ))
+                                    (elapsed
+                                        .saturating_sub(self.prof_decrypt)
+                                        .saturating_sub(self.prof_write))
                                     .as_millis() as f64
                                         / secs,
                                 );
@@ -1626,12 +1664,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
                     })
                     .unwrap_or(false);
                 if is_last_write {
-                    info!("Bandwidth upgrade: LAST_WRITE_TO_PRIOR_CHANNEL; releasing the old channel");
+                    info!(
+                        "Bandwidth upgrade: LAST_WRITE_TO_PRIOR_CHANNEL; releasing the old channel"
+                    );
                     if let Err(e) = self.send_safe_to_close_prior_channel().await {
                         warn!("send_safe_to_close_prior_channel failed: {e}");
                     }
                     // Only now is it safe to move the stream across.
-                    #[cfg(all(feature = "experimental", any(target_os = "linux", target_os = "windows")))]
+                    #[cfg(all(
+                        feature = "experimental",
+                        any(target_os = "linux", target_os = "windows")
+                    ))]
                     if let Some(tx) = &self.switch_tx {
                         let _ = tx.send(());
                     }
@@ -1649,7 +1692,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
                             warn!("offer_wifi_direct_upgrade (on request) failed: {}", e);
                         }
                     } else {
-                        info!("Phone requested an upgrade path; offering WIFI_LAN and WIFI_HOTSPOT");
+                        info!(
+                            "Phone requested an upgrade path; offering WIFI_LAN and WIFI_HOTSPOT"
+                        );
                         self.offer_upgrade_paths().await;
                     }
                 }
@@ -2078,9 +2123,15 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
         // new socket, while this request carried on reading the old one - the
         // stream desynced and the next frame died with "SecureMessage.
         // header_and_body: invalid wire type".
-        #[cfg(all(feature = "experimental", any(target_os = "linux", target_os = "windows")))]
+        #[cfg(all(
+            feature = "experimental",
+            any(target_os = "linux", target_os = "windows")
+        ))]
         let can_upgrade = self.upgrade_tx.is_some();
-        #[cfg(not(all(feature = "experimental", any(target_os = "linux", target_os = "windows"))))]
+        #[cfg(not(all(
+            feature = "experimental",
+            any(target_os = "linux", target_os = "windows")
+        )))]
         let can_upgrade = false;
 
         if !can_upgrade {
@@ -2459,7 +2510,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
 /// SAFE_TO_CLOSE_PRIOR_CHANNEL, then moving the encrypted stream across) is
 /// still to build, so the phone will introduce itself, get its ACK, and then
 /// wait for a move that never comes. The transfer continues on WiFi-LAN.
-#[cfg(all(feature = "experimental", any(target_os = "linux", target_os = "windows")))]
+#[cfg(all(
+    feature = "experimental",
+    any(target_os = "linux", target_os = "windows")
+))]
 pub(crate) async fn introduce_upgraded_channel(
     mut socket: tokio::net::TcpStream,
 ) -> Result<tokio::net::TcpStream, anyhow::Error> {
@@ -2495,7 +2549,8 @@ pub(crate) async fn introduce_upgraded_channel(
         version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
         v1: Some(location_nearby_connections::V1Frame {
             r#type: Some(
-                location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation.into(),
+                location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation
+                    .into(),
             ),
             bandwidth_upgrade_negotiation: Some(BandwidthUpgradeNegotiationFrame {
                 event_type: Some(EventType::ClientIntroductionAck.into()),

@@ -240,7 +240,6 @@ pub fn parse_endpoint_info_bytes(bytes: &[u8]) -> Result<EndpointInfoRecord, any
     })
 }
 
-
 pub async fn stream_read_exact<S: AsyncRead + Unpin>(
     socket: &mut S,
     buf: &mut [u8],
@@ -614,7 +613,10 @@ mod tests {
 
     #[test]
     fn test_encode_point_leaves_positive_value_alone() {
-        assert_eq!(encode_point(Bytes::from_static(&[0x7f])).unwrap(), vec![0x7f]);
+        assert_eq!(
+            encode_point(Bytes::from_static(&[0x7f])).unwrap(),
+            vec![0x7f]
+        );
     }
 
     #[test]
@@ -627,7 +629,10 @@ mod tests {
 
     #[test]
     fn test_encode_point_zero() {
-        assert_eq!(encode_point(Bytes::from_static(&[0x00])).unwrap(), vec![0x00]);
+        assert_eq!(
+            encode_point(Bytes::from_static(&[0x00])).unwrap(),
+            vec![0x00]
+        );
     }
 
     /// RFC 5869 A.1 (SHA-256, basic case). A real known-answer test: it pins

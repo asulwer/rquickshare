@@ -57,7 +57,10 @@ impl WindowsHotspot {
     ///
     /// Blocks until the AP is up or has failed, so the caller can offer the
     /// credentials knowing they're live.
-    pub fn start(ssid: &str, passphrase: &str) -> Result<(Self, HotspotCredentials), anyhow::Error> {
+    pub fn start(
+        ssid: &str,
+        passphrase: &str,
+    ) -> Result<(Self, HotspotCredentials), anyhow::Error> {
         let (ready_tx, ready_rx) = mpsc::channel::<Result<HotspotCredentials, String>>();
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
 
@@ -144,7 +147,9 @@ impl WindowsHotspot {
                 creds,
             )),
             Ok(Err(e)) => Err(anyhow::anyhow!("hotspot start failed: {e}")),
-            Err(e) => Err(anyhow::anyhow!("hotspot thread ended without reporting: {e}")),
+            Err(e) => Err(anyhow::anyhow!(
+                "hotspot thread ended without reporting: {e}"
+            )),
         }
     }
 }

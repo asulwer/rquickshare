@@ -19,7 +19,7 @@
 
 use std::sync::mpsc;
 
-use windows::core::{HSTRING, IInspectable};
+use windows::core::{IInspectable, HSTRING};
 use windows::Devices::WiFi::{
     WiFiAdapter, WiFiAvailableNetwork, WiFiConnectionStatus, WiFiReconnectionKind,
 };
@@ -68,16 +68,17 @@ pub async fn join(ssid: &str, password: &str) -> Result<(), anyhow::Error> {
                 Ok(())
             }))?;
 
-            let find = |adapter: &WiFiAdapter| -> Result<Option<WiFiAvailableNetwork>, anyhow::Error> {
-                let networks = adapter.NetworkReport()?.AvailableNetworks()?;
-                for i in 0..networks.Size()? {
-                    let n = networks.GetAt(i)?;
-                    if n.Ssid()? == wanted {
-                        return Ok(Some(n));
+            let find =
+                |adapter: &WiFiAdapter| -> Result<Option<WiFiAvailableNetwork>, anyhow::Error> {
+                    let networks = adapter.NetworkReport()?.AvailableNetworks()?;
+                    for i in 0..networks.Size()? {
+                        let n = networks.GetAt(i)?;
+                        if n.Ssid()? == wanted {
+                            return Ok(Some(n));
+                        }
                     }
-                }
-                Ok(None)
-            };
+                    Ok(None)
+                };
 
             // 30s is a safety bound: it fails the join, it never picks a
             // different strategy.
@@ -92,18 +93,15 @@ pub async fn join(ssid: &str, password: &str) -> Result<(), anyhow::Error> {
                     break None;
                 }
                 // Woken by a change, or fall through and scan again.
-                let _ = changed_rx.recv_timeout(remaining.min(
-                    std::time::Duration::from_secs(2),
-                ));
+                let _ = changed_rx.recv_timeout(remaining.min(std::time::Duration::from_secs(2)));
                 if let Some(n) = find(&adapter)? {
                     break Some(n);
                 }
             };
             let _ = adapter.RemoveAvailableNetworksChanged(token);
 
-            let network = found.ok_or_else(|| {
-                anyhow::anyhow!("peer's network {ssid} never appeared in a scan")
-            })?;
+            let network = found
+                .ok_or_else(|| anyhow::anyhow!("peer's network {ssid} never appeared in a scan"))?;
 
             let credential = PasswordCredential::new()?;
             credential.SetPassword(&HSTRING::from(password.as_str()))?;
