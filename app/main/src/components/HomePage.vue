@@ -571,9 +571,12 @@ export default {
 				this.clearSendWatchdog(id);
 				// A rejected Tauri command surfaces its `Err(String)` as a raw
 				// string, not an Error, so handle both before falling back.
-				const msg = typeof e === 'string' ? e
-					: e instanceof Error ? e.message
-					: "Could not start the transfer";
+				let msg = "Could not start the transfer";
+				if (typeof e === 'string') {
+					msg = e;
+				} else if (e instanceof Error) {
+					msg = e.message;
+				}
 				this.toastStore.addToast(msg, ToastType.Error);
 				console.error("Error sending to endpoint", e);
 			}
