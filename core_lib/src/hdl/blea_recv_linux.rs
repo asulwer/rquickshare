@@ -73,8 +73,11 @@ impl BleReceiverAdvertiser {
             adapter.address().await?
         );
 
-        let _fast_advertisement =
-            ble_receiver::build_fast_receiver_advertisement(&self.endpoint_id, self.device_type);
+        // Only the full form is needed. The compact "fast" form would go in the
+        // advertisement packet's service data, but it doesn't fit alongside the
+        // service UUID in a legacy packet - Windows hits the same limit (status
+        // 4, StartedWithoutAllAdvertisementData). The phone finds us by the
+        // 0xFEF3 UUID and reads this over GATT instead.
         let full_advertisement = ble_receiver::build_full_receiver_advertisement(
             &self.endpoint_id,
             self.device_type,
