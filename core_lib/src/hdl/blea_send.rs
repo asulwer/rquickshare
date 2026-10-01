@@ -43,6 +43,10 @@ const MAX_PACKET_SIZE: u16 = 509;
 /// The 23-byte MTU every LE link must support, minus the ATT header. Slow, but
 /// it is the only size guaranteed to arrive, and a slow transfer beats a
 /// handshake that dies. Platforms that can report the real MTU never use this.
+///
+/// Windows-only because only Windows asks for the negotiated MTU at all;
+/// elsewhere `proposed_packet_size` goes straight to `MAX_PACKET_SIZE`.
+#[cfg(target_os = "windows")]
 const FALLBACK_PACKET_SIZE: u16 = 20;
 
 /// The largest packet we can honestly say we are able to receive.
@@ -61,13 +65,14 @@ async fn proposed_packet_size(peripheral: &Peripheral) -> u16 {
     #[cfg(target_os = "windows")]
     {
         let addr = peripheral.address().into_inner();
-        let address = u64::from_be_bytes([
-            0, 0, addr[0], addr[1], addr[2], addr[3], addr[4], addr[5],
-        ]);
+        let address =
+            u64::from_be_bytes([0, 0, addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]]);
         match crate::hdl::negotiated_att_mtu(address).await {
             Some(mtu) => {
                 let size = mtu.saturating_sub(3).min(MAX_PACKET_SIZE);
-                info!("{INNER_NAME}: link negotiated a {mtu} B ATT MTU; proposing {size} B packets");
+                info!(
+                    "{INNER_NAME}: link negotiated a {mtu} B ATT MTU; proposing {size} B packets"
+                );
                 size
             }
             None => {
@@ -184,12 +189,14 @@ pub async fn open(peripheral: Peripheral) -> Result<BleChannel, anyhow::Error> {
     }
     peripheral.discover_services().await?;
 
-    let client_tx = find_characteristic(&peripheral, BLE_SOCKET_CLIENT_TX_UUID).ok_or_else(|| {
-        anyhow::anyhow!("peer has no Nearby BLE socket client-tx characteristic (...0101)")
-    })?;
-    let server_tx = find_characteristic(&peripheral, BLE_SOCKET_SERVER_TX_UUID).ok_or_else(|| {
-        anyhow::anyhow!("peer has no Nearby BLE socket server-tx characteristic (...0102)")
-    })?;
+    let client_tx =
+        find_characteristic(&peripheral, BLE_SOCKET_CLIENT_TX_UUID).ok_or_else(|| {
+            anyhow::anyhow!("peer has no Nearby BLE socket client-tx characteristic (...0101)")
+        })?;
+    let server_tx =
+        find_characteristic(&peripheral, BLE_SOCKET_SERVER_TX_UUID).ok_or_else(|| {
+            anyhow::anyhow!("peer has no Nearby BLE socket server-tx characteristic (...0102)")
+        })?;
 
     peripheral.subscribe(&server_tx).await?;
     let mut notifications = peripheral.notifications().await?;

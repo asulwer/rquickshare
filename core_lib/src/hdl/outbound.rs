@@ -42,8 +42,8 @@ use crate::sharing_nearby::{
     TextMetadata,
 };
 use crate::utils::{
-    derive_d2d_keys, encode_point, gen_ecdsa_keypair, gen_random,
-    to_four_digit_string, D2DKeys, DeviceType, RemoteDeviceInfo,
+    derive_d2d_keys, encode_point, gen_ecdsa_keypair, gen_random, to_four_digit_string, D2DKeys,
+    DeviceType, RemoteDeviceInfo,
 };
 use crate::{location_nearby_connections, sharing_nearby};
 
@@ -110,7 +110,8 @@ async fn introduce_over_upgraded_socket(
         version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
         v1: Some(location_nearby_connections::V1Frame {
             r#type: Some(
-                location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation.into(),
+                location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeNegotiation
+                    .into(),
             ),
             bandwidth_upgrade_negotiation: Some(BandwidthUpgradeNegotiationFrame {
                 event_type: Some(EventType::ClientIntroduction.into()),
@@ -554,10 +555,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                         if let Ok(plain) =
                             location_nearby_connections::OfflineFrame::decode(&*frame_data)
                         {
-                            if plain.v1.as_ref().and_then(|v| v.r#type).map(|t| t
-                                == location_nearby_connections::v1_frame::FrameType::Disconnection
-                                    as i32)
-                                == Some(true)
+                            if plain.v1.as_ref().and_then(|v| v.r#type).map(|t| {
+                                t == location_nearby_connections::v1_frame::FrameType::Disconnection
+                                    as i32
+                            }) == Some(true)
                             {
                                 info!("Peer sent an unencrypted disconnect, ending session");
                                 return Err(anyhow!(crate::errors::AppError::NotAnError));
@@ -1053,7 +1054,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                         // joined the upgraded medium we are the client: the peer
                         // announces it is done with the old channel, we
                         // acknowledge, and the channel is finished.
-                        info!("Bandwidth upgrade: peer sent LAST_WRITE_TO_PRIOR_CHANNEL; answering");
+                        info!(
+                            "Bandwidth upgrade: peer sent LAST_WRITE_TO_PRIOR_CHANNEL; answering"
+                        );
                         if let Err(e) = self.send_safe_to_close_prior_channel().await {
                             warn!("send_safe_to_close_prior_channel failed: {e}");
                         }
@@ -1293,8 +1296,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                 // Detect URLs so Android opens them in a browser; otherwise
                 // send as plain text.
                 let trimmed = text.trim();
-                let ttype = if trimmed.starts_with("http://") || trimmed.starts_with("https://")
-                {
+                let ttype = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
                     text_metadata::Type::Url
                 } else {
                     text_metadata::Type::Text
@@ -2329,8 +2331,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
         // question that keeps going unanswered is which of our frames arrives
         // on which side of the peer's switch to an encrypted channel, and that
         // cannot be settled without knowing when each one went out.
-        trace!("send_frame: {length} B on the wire beginning {:02x?}",
-            &data[..data.len().min(12)]);
+        trace!(
+            "send_frame: {length} B on the wire beginning {:02x?}",
+            &data[..data.len().min(12)]
+        );
 
         self.socket.write_all(&prefixed_length).await?;
         self.socket.flush().await?;

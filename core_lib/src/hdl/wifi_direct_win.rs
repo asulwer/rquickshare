@@ -178,7 +178,10 @@ impl WindowsWifiDirect {
             };
             let request = args.GetConnectionRequest()?;
             let device_info = request.DeviceInformation()?;
-            let name = device_info.Name().map(|n| n.to_string()).unwrap_or_default();
+            let name = device_info
+                .Name()
+                .map(|n| n.to_string())
+                .unwrap_or_default();
             let id = device_info.Id()?;
             info!("*** WiFi Direct: ConnectionRequested from {name:?} ***");
 
@@ -368,7 +371,10 @@ fn request_pair(pairing: &DeviceInformationPairing) -> Result<bool, anyhow::Erro
         if let Some(args) = args.as_ref() {
             // PushButton maps to ConfirmOnly: there is no pin to show or type,
             // we just have to say yes. Without this the pairing silently stalls.
-            info!("WiFi Direct: pairing requested, kind {:?}; accepting", args.PairingKind());
+            info!(
+                "WiFi Direct: pairing requested, kind {:?}; accepting",
+                args.PairingKind()
+            );
             args.Accept()?;
         }
         Ok(())

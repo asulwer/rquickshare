@@ -10,8 +10,8 @@ use log::LevelFilter;
 /// from a shell - can't be given an `RQS_LOG` environment variable.
 #[tauri::command]
 pub async fn change_logging_level(message: String) -> Result<(), String> {
-    let level = LevelFilter::from_str(&message)
-        .map_err(|_| format!("unknown logging level: {message}"))?;
+    let level =
+        LevelFilter::from_str(&message).map_err(|_| format!("unknown logging level: {message}"))?;
 
     log::set_max_level(level);
     info!("change_logging_level: now {level:?}");

@@ -15,7 +15,11 @@ type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
 type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 
 /// AES-256-CBC / PKCS7 decrypt. `key` must be at least 32 bytes, `iv` 16.
-pub fn aes256_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, anyhow::Error> {
+pub fn aes256_cbc_decrypt(
+    key: &[u8],
+    iv: &[u8],
+    ciphertext: &[u8],
+) -> Result<Vec<u8>, anyhow::Error> {
     Aes256CbcDec::new_from_slices(&key[..32], iv)
         .map_err(|e| anyhow::anyhow!("aes256-cbc init (decrypt): {e}"))?
         .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
@@ -23,7 +27,11 @@ pub fn aes256_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Ve
 }
 
 /// AES-256-CBC / PKCS7 encrypt. `key` must be at least 32 bytes, `iv` 16.
-pub fn aes256_cbc_encrypt(key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, anyhow::Error> {
+pub fn aes256_cbc_encrypt(
+    key: &[u8],
+    iv: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, anyhow::Error> {
     Ok(Aes256CbcEnc::new_from_slices(&key[..32], iv)
         .map_err(|e| anyhow::anyhow!("aes256-cbc init (encrypt): {e}"))?
         .encrypt_padded_vec_mut::<Pkcs7>(plaintext))
