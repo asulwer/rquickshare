@@ -37,6 +37,11 @@ jobs:
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: ./.github/actions/linux-deps
+      # tauri::generate_context!() embeds the built frontend at compile time
+      # (custom-protocol, on by default and via --all-features), so it needs
+      # app/main/dist to exist. These are Rust tests, not UI tests, so a
+      # placeholder stands in for a full `pnpm vite:build`.
+      - run: mkdir -p app/main/dist && echo '<!doctype html>' > app/main/dist/index.html
       # --workspace picks up app/main/src-tauri, which the old `cd core_lib`
       # form never ran.
       - run: cargo test --workspace --all-features
