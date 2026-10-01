@@ -351,16 +351,39 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
 }
 
 fn handle_window_event(w: &Window, event: &WindowEvent) {
-    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-        if get_realclose(w.app_handle()) {
-            trace!("handle_window_event: real close");
-            return;
-        }
+    match event {
+        tauri::WindowEvent::CloseRequested { api, .. } => {
+            if get_realclose(w.app_handle()) {
+                trace!("handle_window_event: real close");
+                return;
+            }
 
-        trace!("handle_window_event: prevent close");
-        w.hide().unwrap();
-        api.prevent_close();
+            trace!("handle_window_event: prevent close");
+            w.hide().unwrap();
+            api.prevent_close();
+        }
+        // The user bringing the window forward is the moment they expect to be
+        // discoverable, so re-announce then. mdns-sd announces unsolicited only
+        // on `register`, so without this a peer that started browsing after our
+        // one startup announcement wouldn't see us until a visibility toggle.
+        tauri::WindowEvent::Focused(true) => reannounce(w.app_handle()),
+        _ => {}
     }
+}
+
+/// Ask the mDNS server to re-announce. Cheap (a single watch send) and a no-op
+/// while Invisible, so it's safe to fire on every window show/focus.
+fn reannounce(app_handle: &AppHandle) {
+    // `Focused` can fire before `setup` has managed the state; skip until then.
+    if app_handle.try_state::<AppState>().is_none() {
+        return;
+    }
+
+    let app_handle = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let state: tauri::State<'_, AppState> = app_handle.state();
+        state.rqs.lock().await.reannounce();
+    });
 }
 
 fn rs2js_channelmessage(message: ChannelMessage, manager: &AppHandle) {
@@ -390,6 +413,9 @@ fn open_main_window(app_handle: &AppHandle) {
     if let Some(webview_window) = app_handle.get_webview_window("main") {
         let _ = webview_window.show();
         let _ = webview_window.set_focus();
+        // Showing from the tray or a second launch doesn't always raise a
+        // `Focused` event, so re-announce here too.
+        reannounce(app_handle);
         return;
     }
 

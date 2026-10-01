@@ -42,6 +42,9 @@ pub struct MDnsServer {
     // Ticks when the user renames the device; the new name is read from
     // `device_name()` rather than carried on the channel.
     device_name_receiver: watch::Receiver<()>,
+    // Ticks when the window is (re)opened; we re-announce the unchanged record
+    // so a peer that began browsing after startup can still find us.
+    reannounce_receiver: watch::Receiver<()>,
     // Kept so the service record can be rebuilt under a new name.
     endpoint_id: [u8; 4],
     service_port: u16,
@@ -56,6 +59,7 @@ impl MDnsServer {
         visibility_sender: Arc<Mutex<watch::Sender<Visibility>>>,
         visibility_receiver: watch::Receiver<Visibility>,
         device_name_receiver: watch::Receiver<()>,
+        reannounce_receiver: watch::Receiver<()>,
     ) -> Result<Self, anyhow::Error> {
         let device_type = DeviceType::Laptop;
         let service_info = Self::build_service(endpoint_id, service_port, device_type.clone())?;
@@ -67,6 +71,7 @@ impl MDnsServer {
             visibility_sender,
             visibility_receiver,
             device_name_receiver,
+            reannounce_receiver,
             endpoint_id,
             service_port,
             device_type,
@@ -144,14 +149,40 @@ impl MDnsServer {
                     // not we are already registered - collapsing both arms into one.
                     self.daemon.register(self.service_info.clone())?;
                 },
-                _ = interval.tick() => {
-                    if visibility != Visibility::Temporarily {
+                _ = self.reannounce_receiver.changed() => {
+                    self.reannounce_receiver.borrow_and_update();
+
+                    // Nothing to announce while hidden, and re-registering would
+                    // undo the unregister that Invisible performed.
+                    if visibility == Visibility::Invisible {
                         continue;
                     }
 
-                    let receiver = self.daemon.unregister(self.service_info.get_fullname())?;
-                    let _ = receiver.recv();
-                    let _ = self.visibility_sender.lock().unwrap().send(Visibility::Invisible);
+                    // Same re-announce as the ble arm: `register` re-sends the
+                    // unsolicited response for the unchanged record, so a peer
+                    // that started browsing after our startup announcement now
+                    // sees us. Triggered when the window is (re)opened.
+                    debug!("{INNER_NAME}: reannounce_receiver: re-announcing");
+                    self.daemon.register(self.service_info.clone())?;
+                },
+                _ = interval.tick() => {
+                    // Temporarily has expired: stop advertising and flip back to
+                    // Invisible.
+                    if visibility == Visibility::Temporarily {
+                        let receiver = self.daemon.unregister(self.service_info.get_fullname())?;
+                        let _ = receiver.recv();
+                        let _ = self.visibility_sender.lock().unwrap().send(Visibility::Invisible);
+                        continue;
+                    }
+
+                    // Periodic re-announcement while visible. A device left
+                    // Visible in the tray otherwise announces only once at
+                    // startup, so a peer that starts browsing later never finds
+                    // it until something forces a fresh `register`.
+                    if visibility == Visibility::Visible {
+                        trace!("{INNER_NAME}: periodic re-announce");
+                        self.daemon.register(self.service_info.clone())?;
+                    }
                 }
             }
         }

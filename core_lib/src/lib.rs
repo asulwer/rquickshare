@@ -131,6 +131,13 @@ pub struct RQS {
     device_name_sender: watch::Sender<()>,
     device_name_receiver: watch::Receiver<()>,
 
+    // Tells the mDNS server to re-announce the current service record without
+    // any change to it. Fired when the window is (re)opened so a peer that
+    // began browsing after our one startup announcement can still find us -
+    // mdns-sd only announces unsolicited on `register`. Only a tick.
+    reannounce_sender: watch::Sender<()>,
+    reannounce_receiver: watch::Receiver<()>,
+
     port_number: Option<u32>,
 
     pub message_sender: broadcast::Sender<ChannelMessage>,
@@ -154,6 +161,7 @@ impl RQS {
         let (message_sender, _) = broadcast::channel(50);
         let (ble_sender, _) = broadcast::channel(5);
         let (device_name_sender, device_name_receiver) = watch::channel(());
+        let (reannounce_sender, reannounce_receiver) = watch::channel(());
 
         // Define default visibility as per the args inside the new()
         let (visibility_sender, visibility_receiver) = watch::channel(Visibility::Invisible);
@@ -168,6 +176,8 @@ impl RQS {
             ble_sender,
             device_name_sender,
             device_name_receiver,
+            reannounce_sender,
+            reannounce_receiver,
             port_number,
             message_sender,
         }
@@ -235,6 +245,7 @@ impl RQS {
             self.visibility_sender.clone(),
             self.visibility_receiver.clone(),
             self.device_name_receiver.clone(),
+            self.reannounce_receiver.clone(),
         )?;
         let ctk = ctoken.clone();
         // Log the outcome rather than dropping it. These `run` methods return
@@ -422,6 +433,17 @@ impl RQS {
 
         // Wakes the mDNS server even if no one else is listening.
         let _ = self.device_name_sender.send(());
+    }
+
+    /// Force a fresh mDNS announcement of the current service record.
+    ///
+    /// mdns-sd only sends an unsolicited announcement on `register`, so a peer
+    /// that starts browsing after our single startup announcement never sees
+    /// us. Call this when the window is (re)opened to re-announce. Has no effect
+    /// while the visibility is `Invisible` - the mDNS server ignores the tick
+    /// in that case.
+    pub fn reannounce(&self) {
+        let _ = self.reannounce_sender.send(());
     }
 
     // Setting None here will resume the default settings
