@@ -51,6 +51,14 @@ type HmacSha256 = Hmac<Sha256>;
 
 const SANE_FRAME_LENGTH: i32 = 5 * 1024 * 1024;
 const SANITY_DURATION: Duration = Duration::from_micros(10);
+/// How long to wait, once everything is sent, for the receiver to hang up.
+///
+/// The receiver ends the session itself once it has written every payload.
+/// Hanging up first races that: our DISCONNECTION lands while the peer is still
+/// finishing the last file, and Windows Quick Share then reports "Can't complete
+/// transfer" for a transfer that arrived intact. We only send it ourselves if
+/// the peer has not closed within this long.
+const PEER_HANG_UP_GRACE: Duration = Duration::from_secs(15);
 
 /// Whether to pursue the send-side WiFi upgrade: joining the hotspot the phone
 /// brings up when we are sending to it and its WiFi is off.
@@ -251,6 +259,9 @@ pub struct OutboundRequest<S> {
     /// 30s timeout, and the cancel button did nothing for the same 25s. Over TCP
     /// a chunk is milliseconds and none of it matters.
     chunk_size: usize,
+    /// Set once everything is sent: the point at which we stop waiting for the
+    /// peer to hang up and do it ourselves. See `PEER_HANG_UP_GRACE`.
+    hang_up_deadline: Option<tokio::time::Instant>,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
@@ -310,6 +321,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
             #[cfg(all(feature = "experimental", target_os = "windows"))]
             join_handle: None,
             chunk_size: 512 * 1024,
+            hang_up_deadline: None,
         }
     }
 
@@ -335,7 +347,26 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
     }
 
     pub async fn handle(&mut self) -> Result<(), anyhow::Error> {
+        let r = self.handle_next().await;
+        // The session is over once the peer hangs up after a completed send;
+        // only now is it safe to drop the WiFi link it may be running over.
+        #[cfg(all(feature = "experimental", target_os = "windows"))]
+        if r.is_err() && self.state.state == State::Finished {
+            self.cleanup_upgrade().await;
+        }
+        r
+    }
+
+    async fn handle_next(&mut self) -> Result<(), anyhow::Error> {
+        let hang_up_deadline = self.hang_up_deadline;
         tokio::select! {
+            _ = tokio::time::sleep_until(hang_up_deadline.unwrap_or_else(tokio::time::Instant::now)),
+                if hang_up_deadline.is_some() =>
+            {
+                info!("Peer did not hang up after the transfer; disconnecting");
+                self.disconnection().await?;
+                return Err(anyhow!(crate::errors::AppError::NotAnError));
+            },
             i = self.receiver.recv() => {
                 match i {
                     Ok(channel_msg) => {
@@ -1226,6 +1257,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                         .file_name()
                         .ok_or_else(|| anyhow!("Failed to get file_name for {f}"))?;
                     let fmeta = FileMetadata {
+                        // The attachment id, distinct from the payload id and
+                        // required. Google's receiver swaps an id of 0 for a
+                        // random one but files the payload under 0, so it never
+                        // pairs the payload with its attachment: Windows Quick
+                        // Share saved the file and still said "Can't complete
+                        // transfer".
+                        id: Some(rand::rng().random::<i64>()),
                         payload_id: Some(rand::rng().random::<i64>()),
                         name: Some(fname.to_os_string().into_string().unwrap()),
                         size: Some(fmetadata.len() as i64),
@@ -1339,7 +1377,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                         true,
                     )
                     .await;
-                    self.disconnection().await?;
+                    self.await_peer_hang_up();
                     return Ok(());
                 }
 
@@ -1387,12 +1425,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                                 true,
                             )
                             .await;
-                            self.disconnection().await?;
-                            // Release the WiFi link (and abort a join still
-                            // associating for a transfer that just finished).
-                            #[cfg(all(feature = "experimental", target_os = "windows"))]
-                            self.cleanup_upgrade().await;
-                            // Breaking instead of NotAnError to allow peacefull termination
+                            // Breaking instead of NotAnError so `handle` keeps
+                            // reading until the peer hangs up.
+                            self.await_peer_hang_up();
                             break;
                         }
                     };
@@ -1717,6 +1752,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
         self.encrypt_and_send(&wrapper).await?;
 
         Ok(())
+    }
+
+    /// Leave the session open for the receiver to close; see
+    /// `PEER_HANG_UP_GRACE`.
+    fn await_peer_hang_up(&mut self) {
+        self.hang_up_deadline = Some(tokio::time::Instant::now() + PEER_HANG_UP_GRACE);
     }
 
     async fn disconnection(&mut self) -> Result<(), anyhow::Error> {
