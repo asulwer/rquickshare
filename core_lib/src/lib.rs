@@ -255,7 +255,7 @@ impl RQS {
         // Connect"; getting the phone to actually list us (M2) needs the full
         // advertisement served over GATT or extended advertising - next step.
         // Non-fatal: like BleListener, it's a nice-to-have.
-        #[cfg(all(feature = "experimental", target_os = "windows"))]
+        #[cfg(all(feature = "experimental", any(target_os = "linux", target_os = "windows")))]
         {
             let ble_recv = crate::hdl::BleReceiverAdvertiser::new(
                 endpoint_id[..4].try_into()?,

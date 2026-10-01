@@ -26,6 +26,10 @@ pub use blea_win::*;
 // BLE receiver advertiser (issue #425). Broadcasts the 0xFEF3 discoverable
 // header so a phone doing BLE-only discovery can list us. Serving the *full*
 // advertisement (GATT / extended adv) is the next milestone.
+#[cfg(all(feature = "experimental", target_os = "linux"))]
+mod blea_recv_linux;
+#[cfg(all(feature = "experimental", target_os = "linux"))]
+pub use blea_recv_linux::*;
 #[cfg(all(feature = "experimental", target_os = "windows"))]
 mod blea_recv_win;
 #[cfg(all(feature = "experimental", target_os = "windows"))]
