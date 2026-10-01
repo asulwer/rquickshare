@@ -1247,12 +1247,40 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
         use crate::location_nearby_connections::bandwidth_upgrade_retry_frame::Medium;
         use crate::location_nearby_connections::BandwidthUpgradeRetryFrame;
 
-        let mut supported_medium = Vec::new();
+        // Claim exactly what we will offer, and offer both when we can.
+        //
+        // WIFI_HOTSPOT is the soft-AP a phone with no network joins (Windows
+        // only - there is no Linux hotspot host yet). WIFI_LAN is added whenever
+        // we have a LAN address, because the phone's WiFi state is not knowable
+        // at negotiation time - the Quick Share extension drops WiFi to send and
+        // then reconnects, so a phone that reported no LAN in its
+        // ConnectionRequest is frequently back on the LAN moments later, unable
+        // to join our AP (one radio, already associated). Advertising both lets
+        // us offer both paths and the phone connect on whichever it can
+        // actually reach.
+        //
+        // WIFI_DIRECT stays out: its offer is gated off (a failed join wedges
+        // the phone's P2P state at [2]BUSY), so claiming it would invite a
+        // medium we never provide.
+        let mut supported_medium: Vec<i32> = Vec::new();
+        let mut medium_names: Vec<&str> = Vec::new();
         if Self::lan_ipv4().is_some() {
             supported_medium.push(Medium::WifiLan.into());
+            medium_names.push("WIFI_LAN");
         }
         #[cfg(target_os = "windows")]
-        supported_medium.push(Medium::WifiHotspot.into());
+        {
+            supported_medium.push(Medium::WifiHotspot.into());
+            medium_names.push("WIFI_HOTSPOT");
+        }
+
+        // With nothing to offer (Linux with no LAN address) say nothing: an
+        // empty list invites the phone to negotiate a medium we can't provide,
+        // and staying silent leaves the transfer on BLE, which is correct.
+        if supported_medium.is_empty() {
+            info!("Bandwidth upgrade: no medium to offer, staying on the current one");
+            return Ok(());
+        }
 
         let frame = OfflineFrame {
             version: Some(location_nearby_connections::offline_frame::Version::V1.into()),
@@ -1261,14 +1289,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
                     location_nearby_connections::v1_frame::FrameType::BandwidthUpgradeRetry.into(),
                 ),
                 bandwidth_upgrade_retry: Some(BandwidthUpgradeRetryFrame {
-                    supported_medium: supported_medium.clone(),
+                    supported_medium,
                     is_request: Some(false),
                 }),
                 ..Default::default()
             }),
         };
         self.encrypt_and_send(&frame).await?;
-        info!("Bandwidth upgrade: replied with supported mediums {:?}", supported_medium);
+        info!("Bandwidth upgrade: replied with supported mediums {medium_names:?}");
         Ok(())
     }
 
