@@ -28,6 +28,7 @@
     "clipboard-manager:allow-write-text",
     "shell:allow-open",
     "opener:allow-open-url",
+    "opener:allow-default-urls",
     {
       "identifier": "opener:allow-open-path",
       "allow": [{ "path": "**" }]
