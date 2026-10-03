@@ -8,7 +8,7 @@ extern crate log;
 
 use std::sync::{Arc, Mutex};
 
-use rqs_lib::channel::{ChannelDirection, ChannelMessage};
+use rqs_lib::channel::{ChannelDirection, ChannelMessage, TransferType};
 use rqs_lib::{EndpointInfo, SendInfo, State, Visibility, RQS};
 use store::get_startminimized;
 #[cfg(target_os = "macos")]
@@ -22,7 +22,9 @@ use tauri_plugin_autostart::MacosLauncher;
 use tokio::sync::{broadcast, mpsc, watch, Mutex as AsyncMutex};
 
 use crate::logger::set_up_logging;
-use crate::notification::{send_request_notification, send_temporarily_notification};
+use crate::notification::{
+    send_request_notification, send_temporarily_notification, send_text_notification,
+};
 use crate::store::{
     get_device_name, get_download_path, get_port, get_realclose, get_visibility, init_default,
     set_visibility,
@@ -275,6 +277,25 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
                             .unwrap_or_else(|| "Unknown".to_string());
                         send_request_notification(name, info.id.clone(), &capp_handle);
                     }
+                    // The card in the window already offers Copy/Open, so only
+                    // notify when the user isn't looking at it.
+                    if info.rtype == Some(TransferType::Inbound)
+                        && info.state == Some(State::Finished)
+                        && !main_window_in_view(&capp_handle)
+                    {
+                        if let Some(meta) = info.meta.as_ref() {
+                            if let (Some(text_type), Some(text)) =
+                                (meta.text_type.clone(), meta.text_payload.clone())
+                            {
+                                let name = meta
+                                    .source
+                                    .as_ref()
+                                    .map(|source| source.name.clone())
+                                    .unwrap_or_else(|| "Unknown".to_string());
+                                send_text_notification(name, text_type, text, &capp_handle);
+                            }
+                        }
+                    }
                     rs2js_channelmessage(info, &capp_handle);
                 }
                 Err(e) => {
@@ -420,6 +441,18 @@ fn open_main_window(app_handle: &AppHandle) {
     }
 
     warn!("open_main_window: no main window found");
+}
+
+/// Whether the main window is on screen and focused. Hidden to the tray,
+/// minimised, or behind another app all count as not in view.
+fn main_window_in_view(app_handle: &AppHandle) -> bool {
+    let Some(w) = app_handle.get_webview_window("main") else {
+        return false;
+    };
+
+    w.is_visible().unwrap_or(false)
+        && !w.is_minimized().unwrap_or(false)
+        && w.is_focused().unwrap_or(false)
 }
 
 fn kill_app(app_handle: &AppHandle) {

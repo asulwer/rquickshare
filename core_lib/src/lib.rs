@@ -84,7 +84,7 @@ mod manager;
 mod qr;
 mod utils;
 
-pub use hdl::{EndpointInfo, OutboundPayload, State, Visibility};
+pub use hdl::{EndpointInfo, OutboundPayload, State, TextPayloadType, Visibility};
 pub use manager::SendInfo;
 pub use utils::{device_name, truncate_device_name, DeviceType, MAX_DEVICE_NAME_LEN};
 
