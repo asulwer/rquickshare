@@ -47,6 +47,7 @@ fn device_token() -> [u8; 2] {
 /// 3, the one this phone lists and transfers to) uses this exact byte, so we do
 /// too. (An earlier detour cleared the 0x10 bit based on a mis-read discovery
 /// that turned out to be a different phone, deviceType 1, byte 0x32 - not us.)
+#[cfg(any(target_os = "windows", test))]
 fn build_endpoint_info_fast(device_type: u8) -> Vec<u8> {
     let mut info = Vec::new();
     info.push((device_type << 1) | 0x10);
@@ -58,6 +59,7 @@ fn build_endpoint_info_fast(device_type: u8) -> Vec<u8> {
 /// Layer 3 fast: `[version/pcp][endpoint_id(4)][info_len(1)][endpoint_info]`.
 /// Omits service_id_hash, bluetooth_mac, uwb and extra_field (all non-fast only),
 /// per google's `BleAdvertisement::operator ByteArray` fast branch.
+#[cfg(any(target_os = "windows", test))]
 fn build_connections_advertisement_fast(endpoint_id: &[u8; 4], endpoint_info: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     out.push(0x23); // (version 1 << 5) | pcp 3
@@ -70,6 +72,7 @@ fn build_connections_advertisement_fast(endpoint_id: &[u8; 4], endpoint_info: &[
 /// Layer 2 fast: `[version/socket/fast byte][data][device_token(2)]`. No
 /// service_id_hash and no 4-byte data_size (fast omits both); the reader takes
 /// the last 2 bytes as the token and the rest as data.
+#[cfg(any(target_os = "windows", test))]
 fn build_medium_advertisement_fast(data: &[u8], device_token: &[u8; 2]) -> Vec<u8> {
     let mut out = Vec::new();
     // version kV2(2) | socket kV2(2) | fast=1 | second_profile=0 = 0x4A
@@ -82,6 +85,7 @@ fn build_medium_advertisement_fast(data: &[u8], device_token: &[u8; 2]) -> Vec<u
 
 /// The complete fast BleAdvertisement to place in the 0xFEF3 service data of a
 /// legacy BLE advertisement.
+#[cfg(any(target_os = "windows", test))]
 pub fn build_fast_receiver_advertisement(endpoint_id: &[u8; 4], device_type: u8) -> Vec<u8> {
     let endpoint_info = build_endpoint_info_fast(device_type);
     let data = build_connections_advertisement_fast(endpoint_id, &endpoint_info);
