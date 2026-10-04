@@ -23,6 +23,12 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
+            # Only the .deb. This workflow proves the app still packages; one
+            # Linux format shows that as well as three. The AppImage step bundles
+            # all of WebKitGTK and GTK around an unstripped debug binary and
+            # compresses it - most of the Linux job's time. release.yml still
+            # builds .deb, .rpm and AppImage for releases.
+            bundles: deb
           # Apple Silicon. macos-13 (the Intel image) was retired: its jobs sat
           # queued for 24h and were cancelled, never running.
           - os: macos-latest
@@ -62,9 +68,13 @@ jobs:
         # bash everywhere, including Windows (Git Bash), where the default
         # shell would be PowerShell.
         shell: bash
+        env:
+          # Empty where the matrix sets no `bundles`: Tauri then builds every
+          # format for that OS.
+          BUNDLES: ${{ matrix.bundles }}
         run: |
           rm -rf "${BUNDLE_DIR}"
-          (cd "${TARGET_PATH}" && pnpm install --frozen-lockfile && pnpm build:debug)
+          (cd "${TARGET_PATH}" && pnpm install --frozen-lockfile && pnpm build:debug ${BUNDLES:+--bundles "$BUNDLES"})
           # Third argument marks the bundle as a debug build in its filename;
           # without it debug and release artifacts are named identically.
           ./rename_build.sh "${BUNDLE_DIR}" "${BUNDLE_NAME}" debug
