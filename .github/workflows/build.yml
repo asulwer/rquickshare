@@ -23,10 +23,15 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
+          # Apple Silicon. macos-13 (the Intel image) was retired: its jobs sat
+          # queued for 24h and were cancelled, never running.
           - os: macos-latest
-          - os: macos-13
+          - os: windows-latest
     env:
       TARGET_PATH: app/main
+      # The repo is a Cargo workspace, so build output lands in the root
+      # target/, not app/main/src-tauri/target/.
+      BUNDLE_DIR: target/debug/bundle
       BUNDLE_NAME: main
     steps:
       - uses: actions/checkout@v4
@@ -52,15 +57,15 @@ jobs:
         run: ldd --version | head -n1
 
       - name: Build Vite + Tauri
+        # bash everywhere, including Windows (Git Bash), where the default
+        # shell would be PowerShell.
+        shell: bash
         run: |
-          rm -rf "${TARGET_PATH}/src-tauri/target/debug/bundle/"
-          cd "./${TARGET_PATH}"
-          pnpm install --frozen-lockfile
-          pnpm build:debug
-          cd "${GITHUB_WORKSPACE}"
+          rm -rf "${BUNDLE_DIR}"
+          (cd "${TARGET_PATH}" && pnpm install --frozen-lockfile && pnpm build:debug)
           # Third argument marks the bundle as a debug build in its filename;
           # without it debug and release artifacts are named identically.
-          ./rename_build.sh "${TARGET_PATH}/src-tauri/target/debug/bundle/" "${BUNDLE_NAME}" debug
+          ./rename_build.sh "${BUNDLE_DIR}" "${BUNDLE_NAME}" debug
 
       - name: Upload result
         uses: actions/upload-artifact@v4
@@ -68,4 +73,7 @@ jobs:
           name: artifact-debug-rquickshare-${{ matrix.os }}
           # Debug bundles are large and only useful while the PR is open.
           retention-days: 7
-          path: ${{ env.TARGET_PATH }}/src-tauri/target/debug/bundle/*/r-quick-share-${{ env.BUNDLE_NAME }}*
+          path: ${{ env.BUNDLE_DIR }}/*/r-quick-share-${{ env.BUNDLE_NAME }}*
+          # Fail rather than warn: an empty upload means the bundle path is
+          # wrong, which is exactly how this used to pass while uploading nothing.
+          if-no-files-found: error
