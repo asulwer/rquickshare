@@ -1,4 +1,5 @@
 {
+	"bootstrap-sha": "c3cb757b017ae1f1a169cbf721de5f9560e73181",
 	"prerelease": true,
 	"packages": {
 		".": {

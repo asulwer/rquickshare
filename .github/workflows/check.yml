@@ -20,7 +20,7 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -30,12 +30,14 @@ jobs:
     name: cargo test
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: arduino/setup-protoc@v3
+      # protoc for prost-build. A composite action (no Node runtime):
+      # arduino/setup-protoc is still on the deprecated Node 20.
+      - uses: taiki-e/install-action@v2
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc
       - uses: ./.github/actions/linux-deps
       # tauri::generate_context!() embeds the built frontend at compile time
       # (custom-protocol, on by default and via --all-features), so it needs
@@ -66,16 +68,16 @@ jobs:
       run:
         working-directory: app/main
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       # No `version:` - action-setup reads packageManager from the app's
       # package.json, so CI and local stay on the same pnpm. There is no
       # package.json at the repo root, hence the explicit path.
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v5
         with:
           package_json_file: app/main/package.json
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
           cache-dependency-path: app/main/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile

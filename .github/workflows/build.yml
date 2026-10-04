@@ -34,20 +34,22 @@ jobs:
       BUNDLE_DIR: target/debug/bundle
       BUNDLE_NAME: main
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v5
         with:
           package_json_file: app/main/package.json
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
           cache-dependency-path: app/main/pnpm-lock.yaml
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - uses: arduino/setup-protoc@v3
+      # protoc for prost-build. A composite action (no Node runtime):
+      # arduino/setup-protoc is still on the deprecated Node 20.
+      - uses: taiki-e/install-action@v2
         with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          tool: protoc
 
       - uses: ./.github/actions/linux-deps
         if: runner.os == 'Linux'
@@ -68,7 +70,7 @@ jobs:
           ./rename_build.sh "${BUNDLE_DIR}" "${BUNDLE_NAME}" debug
 
       - name: Upload result
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: artifact-debug-rquickshare-${{ matrix.os }}
           # Debug bundles are large and only useful while the PR is open.
