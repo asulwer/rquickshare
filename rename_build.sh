@@ -11,14 +11,15 @@ tauri_ver="$2"
 debug_mode="$3"
 
 # Find all relevant files in the base directory
-files=$(find "$base_dir" -type f \( -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" -o -name "*.dmg" \))
+# .msi and .exe (the NSIS -setup.exe installer) are the Windows bundles.
+files=$(find "$base_dir" -type f \( -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" -o -name "*.dmg" -o -name "*.msi" -o -name "*.exe" \))
 
 
-if command -v ldd &> /dev/null; then
+# GLIBC only means something on Linux. Git Bash on Windows ships an ldd too,
+# which would stamp a meaningless "glibc" version into the Windows filenames.
+if [ "$(uname -s)" = "Linux" ] && command -v ldd &> /dev/null; then
     glib_ver=$(ldd --version | head -n1 | awk '{print $NF}')
     echo "GLIBC version: ${glib_ver}"
-else
-    echo "ldd command not found."
 fi
 
 # Loop through each file

@@ -46,10 +46,15 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
+          # Apple Silicon. macos-13 (the Intel image) was retired: its jobs sat
+          # queued for 24h and were cancelled, never running.
           - os: macos-latest
-          - os: macos-13
+          - os: windows-latest
     env:
       TARGET_PATH: app/main
+      # The repo is a Cargo workspace, so build output lands in the root
+      # target/, not app/main/src-tauri/target/.
+      BUNDLE_DIR: target/release/bundle
       BUNDLE_NAME: main
     steps:
       - uses: actions/checkout@v4
@@ -73,19 +78,19 @@ jobs:
         if: runner.os == 'Linux'
 
       - name: Build Vite + Tauri
+        # bash everywhere, including Windows (Git Bash), where the default
+        # shell would be PowerShell.
+        shell: bash
         run: |
-          rm -rf "${TARGET_PATH}/src-tauri/target/release/bundle/"
-          cd "./${TARGET_PATH}"
-          pnpm install --frozen-lockfile
-          pnpm build
-          cd "${GITHUB_WORKSPACE}"
-          ./rename_build.sh "${TARGET_PATH}/src-tauri/target/release/bundle/" "${BUNDLE_NAME}"
+          rm -rf "${BUNDLE_DIR}"
+          (cd "${TARGET_PATH}" && pnpm install --frozen-lockfile && pnpm build)
+          ./rename_build.sh "${BUNDLE_DIR}" "${BUNDLE_NAME}"
 
       - name: Add files to release
         if: github.event_name != 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.TARGET_PATH }}/src-tauri/target/release/bundle/*/r-quick-share-${{ env.BUNDLE_NAME }}*
+          files: ${{ env.BUNDLE_DIR }}/*/r-quick-share-${{ env.BUNDLE_NAME }}*
           fail_on_unmatched_files: true
 
       - name: Upload artifacts
@@ -93,4 +98,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: artifact-release-rquickshare-${{ matrix.os }}
-          path: ${{ env.TARGET_PATH }}/src-tauri/target/release/bundle/*/r-quick-share-${{ env.BUNDLE_NAME }}*
+          path: ${{ env.BUNDLE_DIR }}/*/r-quick-share-${{ env.BUNDLE_NAME }}*
+          if-no-files-found: error
