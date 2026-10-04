@@ -1,5 +1,50 @@
 # Changelog
 
+## [0.13.0](https://github.com/asulwer/rquickshare/compare/v0.12.3...v0.13.0) (2026-10-04)
+
+
+### Features
+
+* **ble:** implement Linux BLE receiver advertiser and GATT service discovery ([f9e05bf](https://github.com/asulwer/rquickshare/commit/f9e05bf5a30be6ace605305e0d1592d63d2986e7))
+* let the user rename the device ([2481f09](https://github.com/asulwer/rquickshare/commit/2481f098778ef9cee9087a9a2eaa11429bcb9c3a))
+* **notification:** notify on received text, with Copy/Open actions ([116273f](https://github.com/asulwer/rquickshare/commit/116273fafa38d580975a141d8c0d433aa499e43e))
+* **notification:** notify on received text, with Copy/Open actions ([dbefb33](https://github.com/asulwer/rquickshare/commit/dbefb3335c50e260d6e508cb6cb087e0102b6ef7))
+* **ui:** give clicks visible feedback, and disable a target while sending ([d3a65ae](https://github.com/asulwer/rquickshare/commit/d3a65ae1ec744cb1f90812cef8a0293efc2414b8))
+
+
+### Bug Fixes
+
+* add an attachment id ([ac10d8e](https://github.com/asulwer/rquickshare/commit/ac10d8e18576f199d5c73c6564ec1176ffef5b93))
+* **ble:** drop the unused fast advertisement on Linux ([73eba16](https://github.com/asulwer/rquickshare/commit/73eba16243f9fc981eeb78f099e00ce1874a1d04))
+* **ble:** keep the medium rationale and don't offer an empty medium list ([49a8cd1](https://github.com/asulwer/rquickshare/commit/49a8cd1a49f39efee700e572340ec1ca68314e5a))
+* bump @tauri-apps/plugin-notification so tauri build runs ([c2d1be7](https://github.com/asulwer/rquickshare/commit/c2d1be708415ecd0a4ebe0ea37241275c66d4f3d))
+* bump @tauri-apps/plugin-notification to ^2.4.0 ([6c6f34a](https://github.com/asulwer/rquickshare/commit/6c6f34ad13def69a6ba942d61a33b6683b20f14f))
+* **ci:** give cargo test a frontend dist, and gate the BLE fallback size to Windows ([0cc93f6](https://github.com/asulwer/rquickshare/commit/0cc93f6e16968d3f8aa158111c102f4463a88185))
+* **ci:** point release-please at the workspace version ([55d97e8](https://github.com/asulwer/rquickshare/commit/55d97e8782a5d4da4642e7a57b491ec5866355d3))
+* compile Windows-only BLE and upgrade helpers only on Windows ([6c407f6](https://github.com/asulwer/rquickshare/commit/6c407f6c83729c2ab5a24f8a77dfd7198f024f73))
+* compile Windows-only BLE and upgrade helpers only on Windows ([fefda64](https://github.com/asulwer/rquickshare/commit/fefda64a35fe8b4f11e13bee881e4b52bc137fcf))
+* **core:** make sends to Windows Quick Share complete ([b8dcf89](https://github.com/asulwer/rquickshare/commit/b8dcf89da4032518087f23a54caa17efa7ea2d93))
+* **linux:** make the notification's "Be visible" action work ([c397e1d](https://github.com/asulwer/rquickshare/commit/c397e1d1bc26a40435c5bcb95f5cd847b5c070b9))
+* **linux:** make the notification's "Be visible" action work ([d4ec1c4](https://github.com/asulwer/rquickshare/commit/d4ec1c40682c63488f197b4fae26b46f2c6f8809))
+* **linux:** make the titlebar buttons clickable when not maximised ([4bd0521](https://github.com/asulwer/rquickshare/commit/4bd052120788e30308e03c048b2464490dda4463))
+* **linux:** make the titlebar buttons clickable when not maximised ([b892c9b](https://github.com/asulwer/rquickshare/commit/b892c9bf00d2b06ecee2495c8348b028a384d350))
+* make dark mode actually render dark ([24385b8](https://github.com/asulwer/rquickshare/commit/24385b81216b9b84875c9e3083fe9072db3e5ad0))
+* make dark mode actually render dark ([c5cd1ed](https://github.com/asulwer/rquickshare/commit/c5cd1ed2fdddfe2c0563bfdd8648f40f623b9c36))
+* **mdns:** probe peer addresses off the discovery loop ([cdfcfbc](https://github.com/asulwer/rquickshare/commit/cdfcfbc7640b0b16d9586ac3ed60aa17480f4fb6))
+* **mdns:** re-announce so peers see us without toggling visibility ([30c3627](https://github.com/asulwer/rquickshare/commit/30c362782423780a0493d9dc4cb269c540d0d5bd))
+* **mdns:** re-announce so peers see us without toggling visibility ([82abfa4](https://github.com/asulwer/rquickshare/commit/82abfa41a4ec4273597b454bbd2edb5a86756b73))
+* **opener:** allow http(s)/mailto/tel in the open_url scope ([9a810f6](https://github.com/asulwer/rquickshare/commit/9a810f62ea0dfb80f0c01f83170875fe2c114dae))
+* **opener:** let "Open" actually open received links ([f7def81](https://github.com/asulwer/rquickshare/commit/f7def818914013a86a9750fa5b9ff821128e847a))
+* **release:** start release-please at 0.12.3 ([ceb43dd](https://github.com/asulwer/rquickshare/commit/ceb43dd3cfed50f66139c51f8d237785e23bba2b))
+* send Finished instead of dropping connection ([27ca4f1](https://github.com/asulwer/rquickshare/commit/27ca4f1eeab2242577b60a5b51a58cd0ebbcd809))
+* **send:** don't serialise outbound sends, and report connect failures ([c6347d5](https://github.com/asulwer/rquickshare/commit/c6347d55fb9db8bc0d0c1d97011dcb9b8d25a529))
+* **send:** flatten the error-message ternary to satisfy the indent rule ([4b0580e](https://github.com/asulwer/rquickshare/commit/4b0580ee05dabf907aea90072033c3a9b8fdb594))
+* **send:** reject dropped folders with a clear message ([bc8b404](https://github.com/asulwer/rquickshare/commit/bc8b40444b0b609520286470e0ffb30e2fb070af))
+* **send:** reject dropped folders with a clear message ([10d1c61](https://github.com/asulwer/rquickshare/commit/10d1c617f8aa038a2d5dc9a7e57fed9734d25742))
+* **send:** surface backend error messages in the send toast ([333b69a](https://github.com/asulwer/rquickshare/commit/333b69aeaebe152e4c80483edccaf3335c0ed2c1))
+* stop discovery and sending from blocking each other ([44ff377](https://github.com/asulwer/rquickshare/commit/44ff37746de1fd940810b478e8bc7b103800bc92))
+* **ui:** give qrSvg a single writer ([c97995b](https://github.com/asulwer/rquickshare/commit/c97995ba3d763dc64c9c21dab7364cc65177df27))
+
 ## [0.11.5](https://github.com/Martichou/rquickshare/compare/v0.11.4...v0.11.5) (2025-02-23)
 
 
