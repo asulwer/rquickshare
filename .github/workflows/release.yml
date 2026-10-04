@@ -41,6 +41,12 @@ jobs:
     needs: verify
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Uploading assets to the release needs write access to the repo's
+    # contents. Without this the job gets the repository's default token
+    # permissions, read-only on this fork, and every upload fails with
+    # "Resource not accessible by integration" after a successful build.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
