@@ -110,17 +110,18 @@ jobs:
       # that is how a release whose tag-triggered upload failed gets its
       # installers from the current workflow rather than the tag's copy.
       #
-      # `gh release upload` only adds assets. softprops/action-gh-release edits
-      # the release first (name, notes, flags), and GitHub refused that edit
-      # here with every token tried - the workflow's GITHUB_TOKEN with
-      # contents: write, and the release-please PAT - while finding the release
-      # worked fine. Adding assets needs no edit. gh is preinstalled on all
-      # GitHub-hosted runners.
+      # `gh release upload` only adds assets. softprops/action-gh-release
+      # edited the release before uploading, and GitHub refused that edit
+      # whatever token was used. gh is preinstalled on GitHub-hosted runners.
+      #
+      # The upload uses the built-in GITHUB_TOKEN (contents: write, above):
+      # GitHub creates it per run, so it never expires. Only release-please
+      # needs the GH_PAT_RELEASE_ACCESS PAT.
       - name: Add files to release
         if: github.event_name != 'workflow_dispatch' || inputs.publish
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag_name || github.ref_name }}
         run: |
           shopt -s nullglob
