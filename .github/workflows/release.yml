@@ -47,12 +47,6 @@ jobs:
     needs: verify
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    # Uploading assets to the release needs write access to the repo's
-    # contents. Without this the job gets the repository's default token
-    # permissions, read-only on this fork, and every upload fails with
-    # "Resource not accessible by integration" after a successful build.
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -116,6 +110,12 @@ jobs:
         if: github.event_name != 'workflow_dispatch' || inputs.publish
         uses: softprops/action-gh-release@v3
         with:
+          # The workflow's own GITHUB_TOKEN can't edit release-please's releases
+          # here: even with contents: write granted ("Set up job" confirmed it),
+          # the update call fails with "Resource not accessible by integration".
+          # The release-please PAT created the release and its tag, so it can
+          # attach to it. If this PAT expires, uploads fail the same way.
+          token: ${{ secrets.GH_PAT_RELEASE_ACCESS }}
           tag_name: ${{ inputs.tag_name || github.ref_name }}
           files: ${{ env.BUNDLE_DIR }}/*/r-quick-share-${{ env.BUNDLE_NAME }}*
           fail_on_unmatched_files: true
