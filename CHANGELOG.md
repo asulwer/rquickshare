@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.13.1](https://github.com/asulwer/rquickshare/compare/v0.13.0...v0.13.1) (2026-10-04)
+
+
+### Bug Fixes
+
+* **release:** attach installers with gh release upload ([cc4d089](https://github.com/asulwer/rquickshare/commit/cc4d0891ca9af858e7736a7a41fd06674e72e924))
+* **release:** attach installers with gh release upload ([9fea940](https://github.com/asulwer/rquickshare/commit/9fea9401fb9ed103de051012e5e274eacc530618))
+* **release:** give the release build permission to upload its installers ([f31f2e5](https://github.com/asulwer/rquickshare/commit/f31f2e59bfbc6869cde118885351c620bb5d3e87))
+* **release:** give the release build permission to upload its installers ([86f35ba](https://github.com/asulwer/rquickshare/commit/86f35babd42c535bdf2fed9f28ca554db26154e2))
+* **release:** upload installers with the release PAT ([cbd33ce](https://github.com/asulwer/rquickshare/commit/cbd33ce2484da1cc074b11471c0fa9d502c3241f))
+* **release:** upload installers with the release PAT ([1c813c7](https://github.com/asulwer/rquickshare/commit/1c813c7c42598d33b4428d01bcb65ce0f21a5ccc))
+
 ## [0.13.0](https://github.com/asulwer/rquickshare/compare/v0.12.3...v0.13.0) (2026-10-04)
 
 
