@@ -4,8 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Tag to build (artifacts only, nothing is published)'
+        description: 'Tag to build'
         required: true
+      publish:
+        description: >-
+          Attach the installers to the existing GitHub release for this tag.
+          Off: artifacts only, nothing is published.
+        type: boolean
+        default: false
   push:
     tags:
       # Only release-please's tags. A stray `git tag wip` used to start a full
@@ -103,10 +109,14 @@ jobs:
           (cd "${TARGET_PATH}" && pnpm install --frozen-lockfile && pnpm build ${BUNDLES:+--bundles "$BUNDLES"})
           ./rename_build.sh "${BUNDLE_DIR}" "${BUNDLE_NAME}"
 
+      # On a tag push, always. On a manual run, only when `publish` is ticked -
+      # that is how a release whose tag-triggered upload failed gets its
+      # installers from the current workflow rather than the tag's copy.
       - name: Add files to release
-        if: github.event_name != 'workflow_dispatch'
+        if: github.event_name != 'workflow_dispatch' || inputs.publish
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ inputs.tag_name || github.ref_name }}
           files: ${{ env.BUNDLE_DIR }}/*/r-quick-share-${{ env.BUNDLE_NAME }}*
           fail_on_unmatched_files: true
 
