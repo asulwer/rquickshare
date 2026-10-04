@@ -2247,6 +2247,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
 
     /// Tell the peer the prior (BLE) channel may be closed. The last thing that
     /// goes over it.
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
     async fn send_safe_to_close_prior_channel(&mut self) -> Result<(), anyhow::Error> {
         use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType;
         use crate::location_nearby_connections::BandwidthUpgradeNegotiationFrame;
@@ -2270,6 +2271,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
         Ok(())
     }
 
+    #[cfg(all(feature = "experimental", target_os = "windows"))]
     async fn send_upgrade_path_request(&mut self) -> Result<(), anyhow::Error> {
         use crate::location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType;
         use crate::location_nearby_connections::BandwidthUpgradeNegotiationFrame;
