@@ -66,15 +66,6 @@ sudo dnf install r-quick-share-${VERSION}.rpm
 sudo rpm -i r-quick-share-${VERSION}.rpm
 ```
 
-##### AppImage (no root required)
-
-There's no installation needed, you simply have to make it executable and run it:
-
-```bash
-chmod +x r-quick-share_${VERSION}.AppImage
-./r-quick-share_${VERSION}.AppImage
-```
-
 ---
 
 <details>
