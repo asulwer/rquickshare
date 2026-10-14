@@ -146,11 +146,12 @@ impl BleReceiverAdvertiser {
                                 move |req| {
                                     let adv = adv.clone();
                                     async move {
-                                        info!(
-                                            "*** {INNER_NAME}: served advertisement over GATT read (offset={}) ***",
-                                            req.offset
-                                        );
                                         let offset = req.offset as usize;
+                                        let slice_len = if offset >= adv.len() { 0 } else { adv.len() - offset };
+                                        info!(
+                                            "*** {INNER_NAME}: served advertisement over GATT read (offset={}, mtu={}, device={}, adv_len={}, returning {} B) ***",
+                                            req.offset, req.mtu, req.device_address, adv.len(), slice_len
+                                        );
                                         if offset >= adv.len() {
                                             Ok(Vec::new())
                                         } else {

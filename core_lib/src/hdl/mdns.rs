@@ -80,6 +80,11 @@ impl MDnsServer {
         let mut visibility = *self.visibility_receiver.borrow();
         let mut interval = interval_at(Instant::now() + TICK_INTERVAL, TICK_INTERVAL);
 
+        if visibility != Visibility::Invisible {
+            info!("{INNER_NAME}: initial registration: {visibility:?}");
+            self.daemon.register(self.service_info.clone())?;
+        }
+
         loop {
             tokio::select! {
                 _ = ctk.cancelled() => {
