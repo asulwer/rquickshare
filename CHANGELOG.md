@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.14.0](https://github.com/asulwer/rquickshare/compare/v0.13.1...v0.14.0) (2026-10-16)
+
+
+### Features
+
+* add an "Open folder" button to received files ([a10cdb1](https://github.com/asulwer/rquickshare/commit/a10cdb1a92fadc6fc917671d8ba7d1a48432f9fc))
+* add an "Open folder" button to received files ([c76c073](https://github.com/asulwer/rquickshare/commit/c76c0735d0fe92bc5d79d738164c1b13169771bb))
+* select every received file in "Open folder" ([987e319](https://github.com/asulwer/rquickshare/commit/987e3197b9a15f590c85c5ef39e0c5fb0da7d29e))
+
+
+### Bug Fixes
+
+* **inbound:** report saved file names once a transfer finishes ([9fb9b34](https://github.com/asulwer/rquickshare/commit/9fb9b34e8fc67d85eec28ff81869618e9ef4459c))
+
 ## [0.13.1](https://github.com/asulwer/rquickshare/compare/v0.13.0...v0.13.1) (2026-10-04)
 
 
