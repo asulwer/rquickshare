@@ -26,6 +26,9 @@ windows = { version = "0.58", features = [
     # WiFiDirectConnectionListener hands back a DeviceInformation for the peer;
     # accepting the connection means resolving it by id.
     "Devices_Enumeration",
+    # The Bluetooth radio's state, so the nearby-sharing listener starts
+    # again when Bluetooth turns back on.
+    "Devices_Radios",
     "Networking",
     "Networking_Connectivity",
     "Networking_NetworkOperators",

@@ -84,22 +84,24 @@ pub fn send_request_notification(name: String, id: String, app_handle: &AppHandl
 }
 
 pub fn send_temporarily_notification(app_handle: &AppHandle) {
-    let body = "RQuickShare is temporarily hidden".to_string();
+    let summary = "A nearby device is sharing";
 
     #[cfg(not(target_os = "linux"))]
     let _ = app_handle
         .notification()
         .builder()
-        .title("RQuickShare")
-        .body(&body)
+        .title(summary)
+        .body("You're hidden, so it can't see this computer. Open RQuickShare to become visible.")
         .show();
 
     #[cfg(target_os = "linux")]
     match Notification::new()
-        .summary("RQuickShare")
-        .body(&body)
-        .action("visible", "Be visible (1m)")
-        .action("ignore", "Ignore")
+        .summary(summary)
+        .body(
+            "You're hidden, so it can't see this computer. Become visible for 1 minute to receive?",
+        )
+        .action("visible", "Visible for 1 min")
+        .action("ignore", "Stay hidden")
         .id(1919)
         .show()
     {

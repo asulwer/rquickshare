@@ -1,6 +1,6 @@
 import { Visibility } from '@martichou/core_lib/bindings/Visibility';
 import { TauriVM } from './helper/ParamsHelper';
-import { autostartKey, clipboardAutosyncKey, debugLevelKey, DisplayedItem, downloadPathKey, numberToVisibility, realcloseKey, startminimizedKey, stateToDisplay, visibilityKey, visibilityToNumber } from './types';
+import { autostartKey, clipboardAutosyncKey, debugLevelKey, DisplayedItem, downloadPathKey, nearbyAlertsKey, numberToVisibility, realcloseKey, startminimizedKey, stateToDisplay, visibilityKey, visibilityToNumber } from './types';
 import { SendInfo } from '@martichou/core_lib/bindings/SendInfo';
 import { ChannelMessage } from '@martichou/core_lib/bindings/ChannelMessage';
 import { ChannelAction } from '@martichou/core_lib';
@@ -93,6 +93,17 @@ async function setStartMinimized(vm: TauriVM, startminimized: boolean) {
 
 async function getStartMinimized(vm: TauriVM) {
 	vm.startminimized = await vm.store.get(startminimizedKey) ?? false;
+}
+
+async function setNearbyAlerts(vm: TauriVM, nearbyAlerts: boolean) {
+	await vm.invoke('change_nearby_alerts', { message: nearbyAlerts });
+	await vm.store.set(nearbyAlertsKey, nearbyAlerts);
+	await vm.store.save();
+	vm.nearbyAlerts = nearbyAlerts;
+}
+
+async function getNearbyAlerts(vm: TauriVM) {
+	vm.nearbyAlerts = await vm.store.get(nearbyAlertsKey) ?? true;
 }
 
 async function setClipboardAutosync(vm: TauriVM, clipboardAutosync: boolean) {
@@ -277,6 +288,8 @@ export const utils = {
 	getLatestVersion,
 	setStartMinimized,
 	getStartMinimized,
+	setNearbyAlerts,
+	getNearbyAlerts,
 	setClipboardAutosync,
 	getClipboardAutosync
 };

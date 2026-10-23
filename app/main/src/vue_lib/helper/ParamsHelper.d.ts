@@ -25,6 +25,7 @@ export interface TauriVM {
     autostart: boolean;
     realclose: boolean;
     startminimized: boolean;
+    nearbyAlerts: boolean;
     clipboardAutosync: boolean;
     visibility: Visibility;
     downloadPath: string | undefined;

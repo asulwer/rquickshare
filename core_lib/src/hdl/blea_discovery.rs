@@ -305,9 +305,10 @@ impl Default for DiscoveryPause {
     }
 }
 
-/// Outbound BLE transfers only - see `AdvertisePause`.
-static BLE_SEND_COUNT: once_cell::sync::Lazy<std::sync::atomic::AtomicUsize> =
-    once_cell::sync::Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
+/// Outbound BLE transfers only - see `AdvertisePause`. A `watch` so the Linux
+/// advertiser can wait on it rather than poll.
+static BLE_SEND_COUNT: once_cell::sync::Lazy<tokio::sync::watch::Sender<usize>> =
+    once_cell::sync::Lazy::new(|| tokio::sync::watch::channel(0usize).0);
 
 /// Pauses the BLE *receiver advertisement* while we are sending over BLE.
 ///
@@ -321,7 +322,7 @@ pub struct AdvertisePause;
 
 impl AdvertisePause {
     pub fn new() -> Self {
-        BLE_SEND_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        BLE_SEND_COUNT.send_modify(|n| *n += 1);
         Self
     }
 }
@@ -334,13 +335,20 @@ impl Default for AdvertisePause {
 
 impl Drop for AdvertisePause {
     fn drop(&mut self) {
-        BLE_SEND_COUNT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        BLE_SEND_COUNT.send_modify(|n| *n = n.saturating_sub(1));
     }
 }
 
 /// Is a BLE send running right now?
+#[cfg(target_os = "windows")]
 pub fn ble_send_in_progress() -> bool {
-    BLE_SEND_COUNT.load(std::sync::atomic::Ordering::SeqCst) > 0
+    *BLE_SEND_COUNT.borrow() > 0
+}
+
+/// Follows how many BLE sends are running.
+#[cfg(target_os = "linux")]
+pub fn ble_sends() -> tokio::sync::watch::Receiver<usize> {
+    BLE_SEND_COUNT.subscribe()
 }
 
 impl Drop for DiscoveryPause {

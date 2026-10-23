@@ -124,6 +124,10 @@ _Note: Samsung changed Quick Share on its devices, so the shortcut workaround ma
 
 This is normal when your computer is relying on Bluetooth to find the phone: Android periodically withdraws its advertisement and only reappears when it sees the Bluetooth message again.
 
+### My Bluetooth mouse or keyboard lags or won't reconnect (Linux)
+
+To notify you when a nearby phone is sharing, rquickshare listens over Bluetooth. Unless BlueZ offers a passive monitor, that means scanning, and while a scan runs the Bluetooth controller can't take a reconnection from a mouse or keyboard. Turn off **Notify me when a nearby device is sharing** in the settings to stop it. See [docs/ble-nearby-alert.md](docs/ble-nearby-alert.md) for the details, including the passive mode and its trade-offs.
+
 ### How do I send text or a link?
 
 Copy the text (or URL) to your clipboard, then press `Ctrl+V` (or `Cmd+V`) inside the rquickshare window and pick the target device. URLs are sent so the receiving Android device can open them in a browser. You can also enable **Auto-stage clipboard text** in Settings to have newly copied text staged for sending automatically.

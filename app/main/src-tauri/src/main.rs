@@ -20,8 +20,8 @@ use crate::notification::{
     send_request_notification, send_temporarily_notification, send_text_notification,
 };
 use crate::store::{
-    get_device_name, get_download_path, get_port, get_realclose, get_visibility, init_default,
-    set_visibility,
+    get_device_name, get_download_path, get_nearby_alerts, get_port, get_realclose, get_visibility,
+    init_default, set_visibility,
 };
 
 mod cmds;
@@ -68,6 +68,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .invoke_handler(tauri::generate_handler![
             cmds::change_download_path,
             cmds::change_logging_level,
+            cmds::change_nearby_alerts,
             cmds::change_visibility,
             cmds::start_discovery,
             cmds::stop_discovery,
@@ -95,6 +96,7 @@ async fn main() -> Result<(), anyhow::Error> {
             let port_number = get_port(app.app_handle());
             let download_path = get_download_path(app.app_handle());
             let device_name = get_device_name(app.app_handle());
+            let nearby_alerts = get_nearby_alerts(app.app_handle());
 
             let app_handle = app.app_handle().clone();
             // This is not optimal, but until I find a better way to init log
@@ -109,6 +111,9 @@ async fn main() -> Result<(), anyhow::Error> {
                     // carries the user's name instead of briefly advertising the
                     // hostname until the front end mounts and corrects it.
                     rqs.set_device_name(device_name);
+                    // Before `run` too, so a user who turned it off never gets
+                    // even one scan.
+                    rqs.set_nearby_alerts(nearby_alerts);
                     let (sender_file, ble_receiver) = rqs.run().await.unwrap();
 
                     // Define state for tauri app

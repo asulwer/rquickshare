@@ -294,6 +294,7 @@ export default {
 			autostart: ref<boolean>(true),
 			realclose: ref<boolean>(false),
 			startminimized: ref<boolean>(false),
+			nearbyAlerts: ref<boolean>(true),
 			clipboardAutosync: ref<boolean>(false),
 			debugLevel: ref<string>('info'),
 			lastClipboard: ref<string | undefined>(undefined),
@@ -332,6 +333,7 @@ export default {
 				await this.getLoggingLevel(this);
 				await this.getRealclose(this);
 				await this.getStartMinimized(this);
+				await this.getNearbyAlerts(this);
 				await this.getClipboardAutosync(this);
 				await this.getDownloadPath(this);
 			} catch (e) {

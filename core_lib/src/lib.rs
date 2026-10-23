@@ -128,6 +128,11 @@ pub struct RQS {
     // Only used to send the info "a nearby device is sharing"
     ble_sender: broadcast::Sender<()>,
 
+    // Whether to listen for that at all. Where nothing passive is available,
+    // listening scans, which can keep Bluetooth mice and keyboards from
+    // reconnecting.
+    nearby_alerts_sender: watch::Sender<bool>,
+
     // Tells the mDNS server that `device_name()` changed so it can re-announce
     // under the new name. Only a tick: the name itself lives in
     // CUSTOM_DEVICE_NAME, which stays the single source of truth.
@@ -165,6 +170,7 @@ impl RQS {
         let (ble_sender, _) = broadcast::channel(5);
         let (device_name_sender, device_name_receiver) = watch::channel(());
         let (reannounce_sender, reannounce_receiver) = watch::channel(());
+        let (nearby_alerts_sender, _) = watch::channel(true);
 
         // Define default visibility as per the args inside the new()
         let (visibility_sender, visibility_receiver) = watch::channel(Visibility::Invisible);
@@ -177,6 +183,7 @@ impl RQS {
             visibility_sender: Arc::new(Mutex::new(visibility_sender)),
             visibility_receiver,
             ble_sender,
+            nearby_alerts_sender,
             device_name_sender,
             device_name_receiver,
             reannounce_sender,
@@ -230,7 +237,12 @@ impl RQS {
         #[cfg(feature = "experimental")]
         {
             // Don't threat BleListener error as fatal, it's a nice to have.
-            if let Ok(ble) = BleListener::new(self.ble_sender.clone()).await {
+            if let Ok(ble) = BleListener::new(
+                self.ble_sender.clone(),
+                self.nearby_alerts_sender.subscribe(),
+            )
+            .await
+            {
                 let ctk = ctoken.clone();
                 tracker.spawn(async move {
                     if let Err(e) = ble.run(ctk).await {
@@ -279,6 +291,11 @@ impl RQS {
                 crate::utils::DeviceType::Laptop as u8,
                 crate::utils::device_name(),
                 self.message_sender.clone(),
+                // Linux pauses advertising while hidden. Windows doesn't:
+                // `StopAdvertising` drops connected GATT clients, so pausing
+                // there could cut an inbound transfer.
+                #[cfg(target_os = "linux")]
+                self.visibility_receiver.clone(),
             );
             let ctk = ctoken.clone();
             tracker.spawn(async move {
@@ -453,6 +470,15 @@ impl RQS {
     /// in that case.
     pub fn reannounce(&self) {
         let _ = self.reannounce_sender.send(());
+    }
+
+    /// Turn the "a nearby device is sharing" alert on or off.
+    ///
+    /// Off stops the Bluetooth listening behind it, which is a scan unless the
+    /// platform can listen passively. Takes effect immediately.
+    pub fn set_nearby_alerts(&self, enabled: bool) {
+        debug!("Setting the nearby sharing alerts to {enabled}");
+        self.nearby_alerts_sender.send_replace(enabled);
     }
 
     // Setting None here will resume the default settings

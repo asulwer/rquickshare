@@ -42,6 +42,7 @@ export const numberToVisibility: { [key: number]: Visibility } = {
 export const autostartKey = "autostart";
 export const realcloseKey = "realclose";
 export const startminimizedKey = "startminimized";
+export const nearbyAlertsKey = "nearby_alerts";
 export const clipboardAutosyncKey = "clipboard_autosync";
 export const visibilityKey = "visibility";
 export const downloadPathKey = "download_path";

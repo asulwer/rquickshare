@@ -30,6 +30,10 @@ pub fn init_default(app_handle: &AppHandle) {
     if !store.has("startminimized") {
         store.set("startminimized", false);
     }
+
+    if !store.has("nearby_alerts") {
+        store.set("nearby_alerts", true);
+    }
 }
 
 pub fn get_realclose(app_handle: &AppHandle) -> bool {
@@ -128,4 +132,15 @@ pub fn get_startminimized(app_handle: &AppHandle) -> bool {
         .get("startminimized")
         .and_then(|json| json.as_bool())
         .unwrap_or_default()
+}
+
+/// Whether to alert when a nearby device is sharing. Listening for that can
+/// keep Bluetooth mice and keyboards from reconnecting, so it's a setting.
+pub fn get_nearby_alerts(app_handle: &AppHandle) -> bool {
+    let store = _get_store(app_handle);
+
+    store
+        .get("nearby_alerts")
+        .and_then(|json| json.as_bool())
+        .unwrap_or(true)
 }
