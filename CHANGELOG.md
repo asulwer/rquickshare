@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.14.0](https://github.com/asulwer/rquickshare/compare/v0.13.1...v0.14.0) (2026-10-23)
+
+
+### Features
+
+* add an "Open folder" button to received files ([a10cdb1](https://github.com/asulwer/rquickshare/commit/a10cdb1a92fadc6fc917671d8ba7d1a48432f9fc))
+* add an "Open folder" button to received files ([c76c073](https://github.com/asulwer/rquickshare/commit/c76c0735d0fe92bc5d79d738164c1b13169771bb))
+* select every received file in "Open folder" ([987e319](https://github.com/asulwer/rquickshare/commit/987e3197b9a15f590c85c5ef39e0c5fb0da7d29e))
+* **tray:** add a visibility submenu to the tray menu ([80dadbb](https://github.com/asulwer/rquickshare/commit/80dadbba62ca79090199c4fc110b7172aa04e396))
+* **tray:** add a visibility submenu to the tray menu ([382dbb6](https://github.com/asulwer/rquickshare/commit/382dbb6f98ddc7154f90e46e1b53f65de2153edb))
+* **ui:** list shared files one per line on transfer cards ([df51314](https://github.com/asulwer/rquickshare/commit/df51314143cb6a92248b78ff6e8c03029c6e82cd))
+* **ui:** list shared files one per line on transfer cards ([2a979a7](https://github.com/asulwer/rquickshare/commit/2a979a7dcc4c7a204c85d5aba677d03673c7c366))
+* **ui:** tidy the settings dialog and make it keyboard-usable ([60c90a9](https://github.com/asulwer/rquickshare/commit/60c90a9af6a9c9cf6287b9e8c53328f7a355800f))
+* **ui:** tidy the settings dialog and make it keyboard-usable ([b2560d7](https://github.com/asulwer/rquickshare/commit/b2560d7a783838cf22867267f5ea35b2accbae3b))
+
+
+### Bug Fixes
+
+* **inbound:** report saved file names once a transfer finishes ([9fb9b34](https://github.com/asulwer/rquickshare/commit/9fb9b34e8fc67d85eec28ff81869618e9ef4459c))
+* **ui:** show the progress ring's track in dark mode ([fa6e047](https://github.com/asulwer/rquickshare/commit/fa6e047918efb21ea74fd738b3d10bf7e3d18c9d))
+* **ui:** show the progress ring's track in dark mode ([6a180a9](https://github.com/asulwer/rquickshare/commit/6a180a912fe7b1d2a76711dd5ea54692cb6dc54e))
+* **ukey2:** accept EC coordinates shorter than 32 bytes ([d83b8fa](https://github.com/asulwer/rquickshare/commit/d83b8facce95db22367839b004336e07c9e80ae2))
+* **ukey2:** accept EC coordinates shorter than 32 bytes ([45818c4](https://github.com/asulwer/rquickshare/commit/45818c43eca84ca64672b7fb1884257950bef9bb))
+
 ## [0.13.1](https://github.com/asulwer/rquickshare/compare/v0.13.0...v0.13.1) (2026-10-04)
 
 
