@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.14.0](https://github.com/asulwer/rquickshare/compare/v0.13.1...v0.14.0) (2026-10-25)
+
+
+### Features
+
+* add an "Open folder" button to received files ([a10cdb1](https://github.com/asulwer/rquickshare/commit/a10cdb1a92fadc6fc917671d8ba7d1a48432f9fc))
+* add an "Open folder" button to received files ([c76c073](https://github.com/asulwer/rquickshare/commit/c76c0735d0fe92bc5d79d738164c1b13169771bb))
+* **ble:** listen on events instead of timers ([d04c9c5](https://github.com/asulwer/rquickshare/commit/d04c9c5018dffd68288d397185e6746d81fafe06))
+* **ble:** listen passively when BlueZ can, and make the alert optional ([b4a34c8](https://github.com/asulwer/rquickshare/commit/b4a34c837353da22b302555ca138a11f885bb338))
+* select every received file in "Open folder" ([987e319](https://github.com/asulwer/rquickshare/commit/987e3197b9a15f590c85c5ef39e0c5fb0da7d29e))
+* **tray:** add a visibility submenu to the tray menu ([80dadbb](https://github.com/asulwer/rquickshare/commit/80dadbba62ca79090199c4fc110b7172aa04e396))
+* **tray:** add a visibility submenu to the tray menu ([382dbb6](https://github.com/asulwer/rquickshare/commit/382dbb6f98ddc7154f90e46e1b53f65de2153edb))
+* **ui:** list shared files one per line on transfer cards ([df51314](https://github.com/asulwer/rquickshare/commit/df51314143cb6a92248b78ff6e8c03029c6e82cd))
+* **ui:** list shared files one per line on transfer cards ([2a979a7](https://github.com/asulwer/rquickshare/commit/2a979a7dcc4c7a204c85d5aba677d03673c7c366))
+* **ui:** tidy the settings dialog and make it keyboard-usable ([60c90a9](https://github.com/asulwer/rquickshare/commit/60c90a9af6a9c9cf6287b9e8c53328f7a355800f))
+* **ui:** tidy the settings dialog and make it keyboard-usable ([b2560d7](https://github.com/asulwer/rquickshare/commit/b2560d7a783838cf22867267f5ea35b2accbae3b))
+
+
+### Bug Fixes
+
+* **ble:** count a removed device as lost in monitor mode ([85182d9](https://github.com/asulwer/rquickshare/commit/85182d93721e9b0d1d49d952530a9f666b5a88e6))
+* **ble:** follow service data changes in the Linux scan ([6ce7d4c](https://github.com/asulwer/rquickshare/commit/6ce7d4c912dd8e41bc92154eafcf6cc463c14813))
+* **ble:** follow service data with per-device streams on Linux ([f0049dd](https://github.com/asulwer/rquickshare/commit/f0049ddae92005a1e3061c9f9c9b9575f505081f))
+* **ble:** keep the default advertising interval once BlueZ refuses ours ([793319b](https://github.com/asulwer/rquickshare/commit/793319b7f1172bb44666064132ba5501fe674062))
+* **ble:** recover the Linux listener and advertiser more reliably ([b81f67f](https://github.com/asulwer/rquickshare/commit/b81f67f1bb41ecb5f4f3a66491a2b01b72ffa309))
+* **ble:** scan LE only on Linux and survive Bluetooth being turned off ([4d9e1ea](https://github.com/asulwer/rquickshare/commit/4d9e1ea0233f7f41cc89122c2bc6bbbc24078842))
+* **ble:** scan unfiltered so the nearby-sharing prompt fires ([b4ff64a](https://github.com/asulwer/rquickshare/commit/b4ff64a4c58d924cacaade99d7deb078cd6aaa18))
+* **ble:** stop holding the radio while idle ([a533c52](https://github.com/asulwer/rquickshare/commit/a533c5268d736dcf50b55b8944a5caf914d56b79))
+* **ble:** stop the nearby-sharing listener from blocking Bluetooth devices ([000f5d3](https://github.com/asulwer/rquickshare/commit/000f5d3a90348c6ee11c5a87aad7c417850c8e1c))
+* **ble:** wait for Bluetooth to turn on instead of retry timers ([9fd2a70](https://github.com/asulwer/rquickshare/commit/9fd2a70149a70de715b106eb04beb601507361c3))
+* **inbound:** report saved file names once a transfer finishes ([9fb9b34](https://github.com/asulwer/rquickshare/commit/9fb9b34e8fc67d85eec28ff81869618e9ef4459c))
+* **notification:** say why the visibility prompt appears ([959d2e2](https://github.com/asulwer/rquickshare/commit/959d2e2aa3a05f067da4f81dd45fe79d8abefd1c))
+* **settings:** mention macOS in the nearby alert's description ([fd0d835](https://github.com/asulwer/rquickshare/commit/fd0d835e7523a0fdfdaca25a98c325f7b724d165))
+* **settings:** move the nearby alert to Advanced and say what else it does ([a1c260d](https://github.com/asulwer/rquickshare/commit/a1c260d03b3a9b0958b81b66e8b913fc961c443d))
+* **ui:** show the progress ring's track in dark mode ([fa6e047](https://github.com/asulwer/rquickshare/commit/fa6e047918efb21ea74fd738b3d10bf7e3d18c9d))
+* **ui:** show the progress ring's track in dark mode ([6a180a9](https://github.com/asulwer/rquickshare/commit/6a180a912fe7b1d2a76711dd5ea54692cb6dc54e))
+* **ukey2:** accept EC coordinates shorter than 32 bytes ([d83b8fa](https://github.com/asulwer/rquickshare/commit/d83b8facce95db22367839b004336e07c9e80ae2))
+* **ukey2:** accept EC coordinates shorter than 32 bytes ([45818c4](https://github.com/asulwer/rquickshare/commit/45818c43eca84ca64672b7fb1884257950bef9bb))
+
 ## [0.13.1](https://github.com/asulwer/rquickshare/compare/v0.13.0...v0.13.1) (2026-10-04)
 
 
