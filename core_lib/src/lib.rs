@@ -146,6 +146,10 @@ pub struct RQS {
 
     port_number: Option<u32>,
 
+    // Peers that scanned one of our QR codes, with the key that lets a send to
+    // them skip the phone's accept prompt. Discovery adds to it, sends read it.
+    qr_peers: qr::QrPeers,
+
     pub message_sender: broadcast::Sender<ChannelMessage>,
 }
 
@@ -187,6 +191,7 @@ impl RQS {
             reannounce_sender,
             reannounce_receiver,
             port_number,
+            qr_peers: qr::QrPeers::default(),
             message_sender,
         }
     }
@@ -224,6 +229,7 @@ impl RQS {
             tcp_listener,
             self.message_sender.clone(),
             send_channel.1,
+            self.qr_peers.clone(),
         )?;
         let ctk = ctoken.clone();
         tracker.spawn(async move {
@@ -324,7 +330,7 @@ impl RQS {
         &mut self,
         sender: broadcast::Sender<EndpointInfo>,
     ) -> Result<String, anyhow::Error> {
-        let session = qr::QrSession::new()?;
+        let session = qr::QrSession::new(self.qr_peers.clone())?;
         let url = session.url.clone();
         self.start_discovery(sender, Some(session))?;
 
@@ -343,6 +349,14 @@ impl RQS {
 
         let ctk = CancellationToken::new();
         self.discovery_ctk = Some(ctk.clone());
+
+        // A peer that scanned an earlier code can't be found under it again:
+        // each code has its own key, and the old one is no longer shown. Not
+        // cleared on stop, because the front end stops discovery as soon as it
+        // has started a send, which may not have picked up its key yet.
+        if let Ok(mut peers) = self.qr_peers.lock() {
+            peers.clear();
+        }
 
         #[cfg(all(
             feature = "experimental",

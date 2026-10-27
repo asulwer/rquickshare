@@ -72,7 +72,7 @@ log = "0.4.34"
 mdns-sd = "0.21"
 mime_guess = "2.0.5"
 num-bigint = "0.5"
-p256 = { version = "0.14", features = ["ecdh"] }
+p256 = { version = "0.14", features = ["ecdh", "ecdsa"] }
 prost = "0.14"
 rand = "0.10"
 serde = { version = "1.0.229", features = ["derive"] }

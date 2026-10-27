@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
+use p256::ecdsa::SigningKey;
 use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast::Sender;
@@ -12,6 +13,7 @@ use ts_rs::TS;
 use crate::channel::{ChannelDirection, ChannelMessage};
 use crate::errors::AppError;
 use crate::hdl::{InboundRequest, OutboundPayload, OutboundRequest, State};
+use crate::qr::QrPeers;
 use crate::utils::RemoteDeviceInfo;
 
 /// A dual-stack listener reports IPv4 peers as IPv4-mapped IPv6 addresses
@@ -44,6 +46,8 @@ pub struct TcpServer {
     tcp_listener: TcpListener,
     sender: Sender<ChannelMessage>,
     connect_receiver: Receiver<SendInfo>,
+    /// Peers that scanned our QR code, whose accept prompt a send can skip.
+    qr_peers: QrPeers,
     /// Peers with an outbound attempt already running. A send is one entire
     /// transfer long, so without this a second request for the same peer would
     /// open a second connection to a device that is already receiving.
@@ -139,18 +143,31 @@ type UpgradeSinks = (
 #[cfg(not(all(feature = "experimental", target_os = "windows")))]
 type UpgradeSinks = std::convert::Infallible;
 
+/// How one send differs from the defaults: what its transport needs, and
+/// whether the peer scanned our QR code.
+#[derive(Default)]
+struct OutboundOptions {
+    chunk_size: Option<usize>,
+    upgrade_sinks: Option<UpgradeSinks>,
+    /// Signs the handshake so the peer that scanned our QR code accepts
+    /// without asking. See `qr::handshake_signature`.
+    qr_key: Option<SigningKey>,
+}
+
 impl TcpServer {
     pub fn new(
         endpoint_id: [u8; 4],
         tcp_listener: TcpListener,
         sender: Sender<ChannelMessage>,
         connect_receiver: Receiver<SendInfo>,
+        qr_peers: QrPeers,
     ) -> Result<Self, anyhow::Error> {
         Ok(Self {
             endpoint_id,
             tcp_listener,
             sender,
             connect_receiver,
+            qr_peers,
             outbound_inflight: Arc::new(Mutex::new(HashSet::new())),
             connection_closed: Arc::new(tokio::sync::Notify::new()),
         })
@@ -187,6 +204,7 @@ impl TcpServer {
                     let sender = self.sender.clone();
                     let inflight = self.outbound_inflight.clone();
                     let closed = self.connection_closed.clone();
+                    let qr_key = self.qr_peers.lock().ok().and_then(|peers| peers.get(&id).cloned());
 
                     tokio::spawn(async move {
                         // Released however the task ends, a panic included;
@@ -194,7 +212,7 @@ impl TcpServer {
                         // ignored as a duplicate until restart.
                         let _inflight = InflightGuard { set: inflight, id: id.clone(), closed };
 
-                        if let Err(e) = Self::connect(endpoint_id, sender.clone(), cctk, i).await {
+                        if let Err(e) = Self::connect(endpoint_id, sender.clone(), cctk, i, qr_key).await {
                             error!("{INNER_NAME}: error sending: {e}");
 
                             // Failing to even get a stream (no route, BLE peer
@@ -313,13 +331,15 @@ impl TcpServer {
     /// routed onto the Weave socket instead - which is the only way to reach a
     /// phone whose WiFi is off.
     ///
-    /// Takes the two pieces of the server it needs by value rather than `&self`
-    /// so the whole attempt can be driven from a spawned task.
+    /// Takes the pieces of the server it needs by value rather than `&self`
+    /// so the whole attempt can be driven from a spawned task. `qr_key` is set
+    /// when the peer scanned our QR code (see `qr::QrPeers`).
     async fn connect(
         endpoint_id: [u8; 4],
         sender: Sender<ChannelMessage>,
         ctk: CancellationToken,
         si: SendInfo,
+        qr_key: Option<SigningKey>,
     ) -> Result<(), anyhow::Error> {
         debug!("{INNER_NAME}: Connecting to: {}", si.addr);
 
@@ -385,14 +405,21 @@ impl TcpServer {
                 ctk,
                 si,
                 stream,
-                Some(8 * 1024),
-                upgrade_sinks,
+                OutboundOptions {
+                    chunk_size: Some(8 * 1024),
+                    upgrade_sinks,
+                    qr_key,
+                },
             )
             .await;
         }
 
         let socket = TcpStream::connect(si.addr.clone()).await?;
-        Self::drive_outbound(endpoint_id, sender, ctk, si, socket, None, None).await
+        let options = OutboundOptions {
+            qr_key,
+            ..Default::default()
+        };
+        Self::drive_outbound(endpoint_id, sender, ctk, si, socket, options).await
     }
 
     /// The transport-independent half of `connect`: everything after a stream
@@ -403,8 +430,7 @@ impl TcpServer {
         ctk: CancellationToken,
         si: SendInfo,
         stream: S,
-        chunk_size: Option<usize>,
-        upgrade_sinks: Option<UpgradeSinks>,
+        options: OutboundOptions,
     ) -> Result<(), anyhow::Error>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -425,10 +451,13 @@ impl TcpServer {
             },
         );
 
-        if let Some(n) = chunk_size {
+        if let Some(n) = options.chunk_size {
             or.set_chunk_size(n);
         }
-        if let Some(sinks) = upgrade_sinks {
+        if let Some(key) = options.qr_key {
+            or.set_qr_key(key);
+        }
+        if let Some(sinks) = options.upgrade_sinks {
             #[cfg(all(feature = "experimental", target_os = "windows"))]
             {
                 let (upgrade_tx, switch_tx, switched) = sinks;

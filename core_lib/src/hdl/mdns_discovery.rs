@@ -244,6 +244,13 @@ impl MDnsDiscovery {
                             });
                         }
                     }
+                    // Before the front end hears of it, so the send it starts
+                    // straight away finds the key.
+                    if ei.qr_match == Some(true) {
+                        if let Some(session) = &self.qr_session {
+                            session.remember_peer(&ei.id);
+                        }
+                    }
                     let _ = self.sender.send(ei);
                 }
             }
