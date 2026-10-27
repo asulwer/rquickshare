@@ -173,6 +173,13 @@ message PairedKeyEncryptionFrame {
 
   // An optional encrypted data in byte array format.
   optional bytes optional_signed_data = 3;
+
+  // An optional QR code handshake data in a byte array format.
+  // For incoming connection contains a signature of the UKEY2
+  // token, created with the sender's private key.
+  // For outgoing connection contains an HKDF of the connection token and of the
+  // UKEY2 token
+  optional bytes qr_code_handshake_data = 4;
 }
 
 // A paired key verification result packet sent between devices.

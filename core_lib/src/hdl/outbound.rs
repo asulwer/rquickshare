@@ -8,6 +8,7 @@ use anyhow::anyhow;
 use bytes::Bytes;
 use hmac::{Hmac, KeyInit, Mac};
 use p256::ecdh::diffie_hellman;
+use p256::ecdsa::SigningKey;
 use p256::elliptic_curve::sec1::{FromSec1Point, ToSec1Point};
 use p256::{PublicKey, Sec1Point};
 use prost::Message;
@@ -209,6 +210,11 @@ pub struct OutboundRequest<S> {
     sender: Sender<ChannelMessage>,
     receiver: Receiver<ChannelMessage>,
     payload: OutboundPayload,
+    /// Set when the peer scanned our QR code: signing the handshake with it
+    /// lets the peer accept without asking. See `qr::handshake_signature`.
+    qr_key: Option<SigningKey>,
+    /// The UKEY2 auth key (the one the PIN comes from), which `qr_key` signs.
+    auth_key: Option<Vec<u8>>,
     /// Where the upgrade listener delivers the socket the peer connected on,
     /// and the signal that the old channel has been released. Set by the BLE
     /// send path, which is the only transport that can adopt an upgraded socket
@@ -322,6 +328,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
             sender,
             receiver,
             payload,
+            qr_key: None,
+            auth_key: None,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
             upgrade_tx: None,
             #[cfg(all(feature = "experimental", target_os = "windows"))]
@@ -367,6 +375,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
     pub fn set_chunk_size(&mut self, chunk_size: usize) {
         info!("Using {chunk_size} B payload chunks");
         self.chunk_size = chunk_size;
+    }
+
+    /// The peer scanned our QR code; sign the handshake so it accepts without
+    /// asking.
+    pub fn set_qr_key(&mut self, key: SigningKey) {
+        info!("Peer scanned our QR code: asking it to skip its accept prompt");
+        self.qr_key = Some(key);
     }
 
     pub async fn handle(&mut self) -> Result<(), anyhow::Error> {
@@ -1279,6 +1294,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
                 paired_key_encryption: Some(sharing_nearby::PairedKeyEncryptionFrame {
                     secret_id_hash: Some(gen_random(6)),
                     signed_data: Some(gen_random(72)),
+                    qr_code_handshake_data: self
+                        .qr_key
+                        .as_ref()
+                        .zip(self.auth_key.as_deref())
+                        .map(|(key, auth_key)| crate::qr::handshake_signature(key, auth_key)),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -1918,6 +1938,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> OutboundRequest<S> {
             server_key,
             server_hmac_key,
         } = derive_d2d_keys(&derived_secret, &ukey_info)?;
+        self.auth_key = Some(auth_string.clone());
 
         self.update_state(
             |e| {
