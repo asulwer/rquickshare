@@ -4,7 +4,8 @@ import { autostartKey, clipboardAutosyncKey, debugLevelKey, DisplayedItem, downl
 import { SendInfo } from '@martichou/core_lib/bindings/SendInfo';
 import { ChannelMessage } from '@martichou/core_lib/bindings/ChannelMessage';
 import { ChannelAction } from '@martichou/core_lib/bindings/ChannelAction';
-import { displayVersion, isNewerVersion, isReleaseBuild } from './version';
+import { displayVersion } from './version';
+import { checkForUpdate, installUpdate } from './updater';
 
 // Not `_`-prefixed: setup() exposes this on the component, and Vue reserves the
 // `_` and `$` prefixes for its internals (it warns and skips them).
@@ -241,26 +242,6 @@ async function getDownloadPath(vm: TauriVM) {
 	vm.downloadPath = await vm.store.get(downloadPathKey) ?? undefined;
 }
 
-async function getLatestVersion(vm: TauriVM) {
-	// A build that isn't a release has no release to be behind.
-	if (!vm.version || !isReleaseBuild(vm.version)) return;
-	try {
-		const response = await fetch('https://api.github.com/repos/asulwer/rquickshare/releases/latest');
-		if (!response.ok) {
-			throw new Error(`Error: ${response.status} ${response.statusText}`);
-		}
-		const data = await response.json();
-		const new_version = data.tag_name.substring(1);
-		console.log(`Latest version: ${vm.version} vs ${new_version}`);
-
-		if (isNewerVersion(new_version, vm.version)) {
-			vm.new_version = new_version;
-		}
-	} catch (err) {
-		console.error(err);
-	}
-}
-
 // Default export
 export const utils = {
 	computeDisplayedItems,
@@ -282,7 +263,8 @@ export const utils = {
 	getDownloadPath,
 	setDeviceName,
 	getDeviceName,
-	getLatestVersion,
+	checkForUpdate,
+	installUpdate,
 	displayVersion,
 	setStartMinimized,
 	getStartMinimized,

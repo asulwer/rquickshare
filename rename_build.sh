@@ -12,7 +12,9 @@ debug_mode="$3"
 
 # Find all relevant files in the base directory
 # .msi and .exe (the NSIS -setup.exe installer) are the Windows bundles.
-files=$(find "$base_dir" -type f \( -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" -o -name "*.dmg" -o -name "*.msi" -o -name "*.exe" \))
+# .app.tar.gz is the macOS app the in-app updater installs, built only when the
+# Release workflow asks for updater artifacts.
+files=$(find "$base_dir" -type f \( -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" -o -name "*.dmg" -o -name "*.msi" -o -name "*.exe" -o -name "*.app.tar.gz" \))
 
 
 # GLIBC only means something on Linux. Git Bash on Windows ships an ldd too,
@@ -28,6 +30,24 @@ for file in $files; do
     dir=$(dirname "$file")
     filename=$(basename "$file")
     extension="${filename##*.}"
+
+    # Tauri names it after the app alone (rquickshare.app.tar.gz), with no
+    # version or architecture to pick out below, so it gets both from here:
+    # the version from the Release workflow's VERSION, the architecture from
+    # the machine that built it.
+    if [[ "$filename" == *.app.tar.gz ]]; then
+        if [ -z "$VERSION" ]; then
+            echo "VERSION is not set, so $filename can't be named"
+            exit 1
+        fi
+        arch=$(uname -m)
+        [ "$arch" = "arm64" ] && arch="aarch64"
+        new_filename="r-quick-share-${tauri_ver}_v${VERSION}_${arch}.app.tar.gz"
+        mv "$file" "$dir/$new_filename"
+        [ -f "$file.sig" ] && mv "$file.sig" "$dir/$new_filename.sig"
+        echo "Renamed $filename to $dir/$new_filename"
+        continue
+    fi
 
     # Extract the version and anything part. A release's version carries its
     # build number after a + (1.26.298+42), as Cargo only takes three numbers;
@@ -63,8 +83,9 @@ for file in $files; do
         fi
     fi
 
-    # Rename the file
+    # Rename the file, and the updater signature that goes with it
     mv "$file" "$dir/$new_filename"
+    [ -f "$file.sig" ] && mv "$file.sig" "$dir/$new_filename.sig"
 
     echo "Renamed $filename to $dir/$new_filename"
 done

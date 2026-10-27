@@ -31,6 +31,13 @@ tauri-plugin-clipboard-manager = "2.5"
 time = { version = "0.3.55", features = ["formatting"] }
 tokio = { version = "1.54", features = ["macros", "rt", "rt-multi-thread", "net", "sync", "time", "io-util"] }
 tauri-plugin-opener = "2.7"
+# Installs a newer release from inside the app. See `updater.rs`.
+tauri-plugin-updater = "2.14"
+# To order release versions the way the Release workflow numbers them.
+semver = "1"
+# `generate_context!` embeds the `plugins` section of tauri.conf.json as
+# serde_json values, and expands to code that names this crate.
+serde_json = "1"
 
 # Only to reach the GTK window behind the Tauri one, so the Wayland titlebar
 # bug in the tao we're pinned to can be patched at startup - see

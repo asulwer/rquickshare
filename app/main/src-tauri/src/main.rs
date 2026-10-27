@@ -29,6 +29,7 @@ mod logger;
 mod notification;
 mod store;
 mod tray;
+mod updater;
 
 pub struct AppState {
     pub message_sender: broadcast::Sender<ChannelMessage>,
@@ -66,6 +67,7 @@ async fn main() -> Result<(), anyhow::Error> {
         // Opens URLs and received files. Tauri v2's replacement for the
         // shell plugin's `open`, which rejects filesystem paths.
         .plugin(tauri_plugin_opener::init())
+        .plugin(updater::plugin())
         .invoke_handler(tauri::generate_handler![
             cmds::change_download_path,
             cmds::change_logging_level,
@@ -81,6 +83,7 @@ async fn main() -> Result<(), anyhow::Error> {
             cmds::send_to_rs,
             cmds::open_received,
             cmds::reveal_received,
+            updater::restart_app,
         ])
         .setup(|app| {
             // Setting up logging inside file for the app

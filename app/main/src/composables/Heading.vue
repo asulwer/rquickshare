@@ -14,7 +14,9 @@ defineProps({
 	}
 });
 
-const emit = defineEmits(['openSettings']);
+const emit = defineEmits(['openSettings', 'installUpdate']);
+
+const releasesUrl = 'https://github.com/asulwer/rquickshare/releases/latest';
 </script>
 
 <template>
@@ -31,9 +33,14 @@ const emit = defineEmits(['openSettings']);
 		<div class="flex justify-center items-center gap-4">
 			<div
 				class="flex items-center gap-2 text-sm transition duration-150 ease-in-out"
-				:class="{'btn active:scale-95': vm.new_version}"
-				@click="vm.new_version && openUrl('https://github.com/asulwer/rquickshare/releases/latest')">
-				<span v-if="vm.new_version">Update available</span>
+				:class="{'btn active:scale-95': vm.new_version && vm.updateState !== 'installing'}"
+				:title="vm.updateState === 'failed' ? 'The update did not install. Click to download it from the releases page.' : undefined"
+				@click="vm.new_version && (vm.updateState === 'failed' ? openUrl(releasesUrl) : emit('installUpdate'))">
+				<span v-if="vm.new_version && vm.updateState === 'idle'">Install update</span>
+				<span v-else-if="vm.updateState === 'installing'">
+					Updating{{ vm.updateProgress === null ? '...' : ` ${vm.updateProgress}%` }}
+				</span>
+				<span v-else-if="vm.updateState === 'failed'">Update failed, download it</span>
 				<p v-if="vm.version && !isReleaseBuild(vm.version)" title="Built from source, not a release, so it doesn't check for updates">
 					v{{ vm.version }} dev build
 				</p>

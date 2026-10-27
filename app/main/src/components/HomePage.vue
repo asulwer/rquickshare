@@ -3,7 +3,7 @@
 		<ToastNotification />
 		<SettingsModal :vm="vm" @close="settingsOpen = false" />
 
-		<Heading :vm="vm" :open-url="openUrl" @open-settings="settingsOpen = true" />
+		<Heading :vm="vm" :open-url="openUrl" @open-settings="settingsOpen = true" @install-update="installUpdate(vm)" />
 
 		<div class="flex-1 flex flex-row">
 			<SideMenu :vm="vm" @invert-visibility="invertVisibility(vm)" @clear-sending="stopSending()" />
@@ -302,6 +302,8 @@ export default {
 			settingsOpen: ref<boolean>(false),
 
 			new_version: opt<string>(),
+			updateState: ref<'idle' | 'installing' | 'failed'>('idle'),
+			updateProgress: ref<number | null>(null),
 		};
 	},
 
@@ -482,7 +484,7 @@ export default {
 				if (focused) await stageClipboard();
 			}));
 
-			await this.getLatestVersion(this);
+			await this.checkForUpdate(this);
 		});
 	},
 

@@ -36,6 +36,11 @@ export interface TauriVM {
     hostnameDefault: string | undefined;
     settingsOpen: boolean;
     new_version: string | null;
+    // 'installing' from the click until the app restarts; 'failed' if the
+    // download or install didn't finish.
+    updateState: 'idle' | 'installing' | 'failed';
+    // Percent downloaded, or null while the size is unknown.
+    updateProgress: number | null;
     enable: () => Promise<void>;
     disable: () => Promise<void>;
     invoke: (cmd: string, args?: InvokeArgs) => Promise<unknown>

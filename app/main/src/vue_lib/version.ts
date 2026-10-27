@@ -12,15 +12,3 @@ export function displayVersion(version: string): string {
 export function isReleaseBuild(version: string): boolean {
 	return !/^\d+\.0\.0$/.test(version);
 }
-
-// Compares two dotted versions number by number; a missing part counts as 0.
-export function isNewerVersion(candidate: string, current: string): boolean {
-	const a = candidate.split('.').map(Number);
-	const b = current.split('.').map(Number);
-	if (a.some(Number.isNaN) || b.some(Number.isNaN)) return false;
-	for (let i = 0; i < Math.max(a.length, b.length); i++) {
-		const diff = (a[i] ?? 0) - (b[i] ?? 0);
-		if (diff !== 0) return diff > 0;
-	}
-	return false;
-}

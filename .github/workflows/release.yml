@@ -15,6 +15,16 @@ name: Release
 # and the version the app shows all read 1.26.298.42. Cargo only takes three
 # numbers, so Cargo.toml gets 1.26.298+42 and Tauri turns the +42 back into the
 # fourth number for the Windows installers.
+#
+# In-app updates: every installer is signed for tauri-plugin-updater, and the
+# release carries a latest.json pointing the app at them. That needs, in the
+# repo's Actions settings:
+#   secret   TAURI_SIGNING_PRIVATE_KEY           from `pnpm tauri signer generate`
+#   secret   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password, if it has one
+#   variable TAURI_UPDATER_PUBKEY                the matching public key
+# The public key is built into the app, which then only installs downloads that
+# key's private half signed. Keep the same pair: a new one can't update apps
+# built with the old public key.
 on:
   workflow_dispatch:
     inputs:
@@ -41,9 +51,17 @@ jobs:
         env:
           PUBLISH: ${{ inputs.publish }}
           RUN_NUMBER: ${{ github.run_number }}
+          HAS_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+          UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
         run: |
           if [ "$PUBLISH" = "true" ] && [ "$GITHUB_REF" != "refs/heads/master" ]; then
             echo "::error::releases are published from master only; untick publish to build ${GITHUB_REF_NAME}"
+            exit 1
+          fi
+          # Checked here, before three OSes spend their time building
+          # installers that the updater couldn't use.
+          if [ "$HAS_SIGNING_KEY" != "true" ] || [ -z "$UPDATER_PUBKEY" ]; then
+            echo "::error::the TAURI_SIGNING_PRIVATE_KEY secret and the TAURI_UPDATER_PUBKEY variable must both be set; see the top of release.yml"
             exit 1
           fi
 
@@ -145,9 +163,21 @@ jobs:
           # Empty where the matrix sets no `bundles`: Tauri then builds every
           # format for that OS.
           BUNDLES: ${{ matrix.bundles }}
+          # Signs each installer for the updater, writing a .sig beside it.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          UPDATER_PUBKEY: ${{ vars.TAURI_UPDATER_PUBKEY }}
         run: |
           rm -rf "${BUNDLE_DIR}"
-          (cd "${TARGET_PATH}" && pnpm install --frozen-lockfile && pnpm build ${BUNDLES:+--bundles "$BUNDLES"})
+          # Only releases sign for the updater and carry its key. tauri.conf.json
+          # leaves the key empty, so other builds neither need the private key
+          # nor check for updates. node writes the JSON so the key is escaped.
+          updater_conf="${RUNNER_TEMP}/updater.conf.json"
+          node -e 'process.stdout.write(JSON.stringify({
+            bundle: { createUpdaterArtifacts: true },
+            plugins: { updater: { pubkey: process.env.UPDATER_PUBKEY } },
+          }))' > "$updater_conf"
+          (cd "${TARGET_PATH}" && pnpm install --frozen-lockfile && pnpm build ${BUNDLES:+--bundles "$BUNDLES"} --config "$updater_conf")
           ./rename_build.sh "${BUNDLE_DIR}" "${BUNDLE_NAME}"
 
       - name: Upload installers
@@ -167,6 +197,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      # For scripts/updater-manifest.mjs.
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: scripts
       - uses: actions/download-artifact@v7
         with:
           path: installers
@@ -178,13 +212,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: v${{ needs.version.outputs.version }}
+          CARGO_VERSION: ${{ needs.version.outputs.cargo_version }}
         run: |
-          shopt -s nullglob globstar
-          files=( installers/**/r-quick-share-* )
+          shopt -s nullglob globstar extglob
+          # The .sig files go into latest.json, not onto the release page.
+          files=( installers/**/r-quick-share-!(*.sig) )
           if [ ${#files[@]} -eq 0 ]; then
             echo "::error::no installers were downloaded"
             exit 1
           fi
+          # Announces the release to the in-app updater. The app compares
+          # versions the way Cargo spells them, so it gets 1.26.298+42.
+          node scripts/updater-manifest.mjs installers "$CARGO_VERSION" "$TAG" "$GITHUB_REPOSITORY" > latest.json
+          files+=( latest.json )
           printf 'attaching %s\n' "${files[@]}"
           # Tags the exact commit that was built. The notes list the pull
           # requests merged since the previous release.

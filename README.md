@@ -67,6 +67,12 @@ sudo dnf install ./r-quick-share-main_v*.rpm
 sudo rpm -i r-quick-share-main_v*.rpm
 ```
 
+#### Updating
+
+When a newer release is out, an **Install update** button appears next to the version at the top of the window. It downloads the installer for the package you have, checks that the release workflow signed it, installs it and restarts the app. On Windows the installer shows its progress window. On Linux you'll be asked for your password, because installing a package needs root.
+
+If the update fails, the button changes to **Update failed, download it** and opens the release page. Builds made from source don't check for updates.
+
 ---
 
 How devices connect
