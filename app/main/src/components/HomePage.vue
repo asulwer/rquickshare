@@ -1,9 +1,9 @@
 <template>
 	<div class="flex flex-col w-full h-full bg-green-50 dark:bg-neutral-900 max-w-full max-h-full overflow-hidden">
 		<ToastNotification />
-		<SettingsModal :vm="vm" @close="settingsOpen = false" />
+		<SettingsModal :vm="vm" :open-url="openUrl" @close="settingsOpen = false" />
 
-		<Heading :vm="vm" :open-url="openUrl" @open-settings="settingsOpen = true" @install-update="installUpdate(vm)" />
+		<Heading :vm="vm" @open-settings="settingsOpen = true" @install-update="installUpdate(vm)" />
 
 		<div class="flex-1 flex flex-row">
 			<SideMenu :vm="vm" @invert-visibility="invertVisibility(vm)" @clear-sending="stopSending()" />
@@ -215,7 +215,6 @@ import { OutboundPayload } from '@martichou/core_lib/bindings/OutboundPayload';
 import { Visibility } from '@martichou/core_lib/bindings/Visibility';
 
 import { ToastNotification, stateToDisplay, autostartKey, DisplayedItem, useToastStore, opt, ToastType, utils } from '../vue_lib';
-import { transferInProgress } from '../vue_lib/updater';
 
 import SettingsModal from '../composables/SettingsModal.vue';
 import Heading from '../composables/Heading.vue';
@@ -303,7 +302,7 @@ export default {
 			settingsOpen: ref<boolean>(false),
 
 			new_version: opt<string>(),
-			updateState: ref<'idle' | 'installing' | 'failed'>('idle'),
+			updateState: ref<'idle' | 'installing' | 'waiting' | 'failed'>('idle'),
 			updateProgress: ref<number | null>(null),
 			updateCheck: ref<'checking' | 'current' | 'available' | 'failed' | null>(null),
 			autoUpdate: ref<boolean>(false),
@@ -506,12 +505,12 @@ export default {
 		displayedItems(): Array<DisplayedItem> {
 			return this.computeDisplayedItems(this);
 		},
-		// With automatic updates on, a found update installs as soon as nothing
-		// would be cut off by the restart. Watched below, so it fires when the
-		// last transfer ends rather than being polled for.
+		// With automatic updates on, a found update installs without asking.
+		// installUpdate itself holds the install and the restart until no
+		// transfer is running. A failed install isn't retried on its own.
 		autoInstallReady(): boolean {
 			return this.autoUpdate && !!this.new_version && this.updateState === 'idle'
-				&& !transferInProgress(this.requests, this.sending.size);
+				&& this.updateCheck !== 'checking';
 		},
 		// Rendered as an <img> rather than v-html: no raw HTML injection.
 		qrDataUri(): string | undefined {

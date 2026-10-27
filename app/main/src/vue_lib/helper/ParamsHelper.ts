@@ -17,6 +17,8 @@ export interface TauriVM {
     debugLevel: string;
     isDragHovering: boolean;
     requests: ChannelMessage[];
+    // Ids of the devices a send is connecting to.
+    sending: Set<string>;
     endpointsInfo: EndpointInfo[];
     outboundPayload: OutboundPayload | undefined;
     unlisten: Array<UnlistenFn>;
@@ -36,9 +38,10 @@ export interface TauriVM {
     hostnameDefault: string | undefined;
     settingsOpen: boolean;
     new_version: string | null;
-    // 'installing' from the click until the app restarts; 'failed' if the
-    // download or install didn't finish.
-    updateState: 'idle' | 'installing' | 'failed';
+    // 'installing' from the click until the app restarts, 'waiting' while a
+    // transfer holds up the install or the restart, 'failed' if the download or
+    // install didn't finish.
+    updateState: 'idle' | 'installing' | 'waiting' | 'failed';
     // Percent downloaded, or null while the size is unknown.
     updateProgress: number | null;
     // The last check's outcome, for Settings. null until one has run.

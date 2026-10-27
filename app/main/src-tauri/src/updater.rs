@@ -1,76 +1,130 @@
 //! In-app updates through `tauri-plugin-updater`.
 //!
-//! The Release workflow publishes a signed `latest.json` with every release,
-//! and the front end asks the plugin to check it. Only release builds carry the
+//! The Release workflow publishes a signed `latest.json` with every release.
+//! The front end drives the steps (check, download, install, restart) so it can
+//! hold the install until no transfer is running. Only release builds carry the
 //! public key the downloads are verified against; see `release.yml`.
+//!
+//! The plugin's own semver comparison is kept: the `semver` crate orders build
+//! metadata numerically, so 1.26.298+43 is already newer than 1.26.298+42.
 
-use semver::Version;
-use tauri::{AppHandle, Runtime};
+use serde::Serialize;
+use tauri::ipc::Channel;
+use tauri::{AppHandle, State};
+use tauri_plugin_updater::{Update, UpdaterExt};
+use tokio::sync::Mutex;
 
-/// The updater plugin, ordering versions with [`is_newer`].
-pub fn plugin<R: Runtime>() -> tauri::plugin::TauriPlugin<R, tauri_plugin_updater::Config> {
-    tauri_plugin_updater::Builder::new()
-        .default_version_comparator(|current, remote| is_newer(&remote.version, &current))
-        .build()
+use crate::stop_rqs;
+
+/// The update the last check found, and its package once downloaded. The front
+/// end only gets the version: the steps run here, where the install can stop
+/// the RQS service first.
+#[derive(Default)]
+pub struct PendingUpdate(Mutex<Option<Pending>>);
+
+struct Pending {
+    update: Update,
+    package: Option<Vec<u8>>,
 }
 
-/// Whether `candidate` is a later release than `current`.
-///
-/// A release is 1.26.298+42: major, year, day of the year, and the Release
-/// workflow's run number as build metadata, because Cargo only takes three
-/// numbers. Semver ignores build metadata when ordering, so the plugin's own
-/// comparison would never offer a second release made on the same day. Here
-/// the run number counts as a fourth number, as it does everywhere the version
-/// is shown.
-pub fn is_newer(candidate: &Version, current: &Version) -> bool {
-    release_order(candidate) > release_order(current)
+/// Download progress, shaped like the plugin's own JS events.
+#[derive(Clone, Serialize)]
+#[serde(tag = "event", content = "data")]
+pub enum DownloadEvent {
+    #[serde(rename_all = "camelCase")]
+    Started {
+        content_length: Option<u64>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Progress {
+        chunk_length: usize,
+    },
+    Finished,
 }
 
-fn release_order(version: &Version) -> (u64, u64, u64, u64) {
-    // A build without a run number (a dev build's <major>.0.0) sorts before
-    // every release of that day.
-    let build = version.build.as_str().parse().unwrap_or(0);
-    (version.major, version.minor, version.patch, build)
-}
-
-/// Restarts into the version the updater just installed.
-///
-/// Windows doesn't need this: the plugin hands over to the installer, which
-/// closes the app and starts the new one. On Linux and macOS the files are
-/// replaced in place and the running process is still the old version.
+/// Asks whether the latest release is newer than this one, and returns its
+/// version if so.
 #[tauri::command]
-pub fn restart_app<R: Runtime>(app: AppHandle<R>) {
+pub async fn check_update(
+    app: AppHandle,
+    pending: State<'_, PendingUpdate>,
+) -> Result<Option<String>, String> {
+    let stop_handle = app.clone();
+    let update = app
+        .updater_builder()
+        // On Windows the plugin starts the installer and ends the process with
+        // `process::exit`, which skips ExitRequested and so the usual
+        // `kill_app`. Stop the service here instead, so BLE, mDNS and the
+        // hotspot are torn down as on any other exit.
+        .on_before_exit(move || {
+            stop_rqs(&stop_handle);
+            stop_handle.cleanup_before_exit();
+        })
+        .build()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())?;
+    let version = update.as_ref().map(|u| u.version.clone());
+    *pending.0.lock().await = update.map(|update| Pending {
+        update,
+        package: None,
+    });
+    Ok(version)
+}
+
+/// Downloads the pending update and checks its signature, without installing
+/// it.
+#[tauri::command]
+pub async fn download_update(
+    pending: State<'_, PendingUpdate>,
+    on_event: Channel<DownloadEvent>,
+) -> Result<(), String> {
+    let mut pending = pending.0.lock().await;
+    let pending = pending.as_mut().ok_or("no update to download")?;
+    let mut started = false;
+    let package = pending
+        .update
+        .download(
+            |chunk_length, content_length| {
+                if !started {
+                    started = true;
+                    send(&on_event, DownloadEvent::Started { content_length });
+                }
+                send(&on_event, DownloadEvent::Progress { chunk_length });
+            },
+            || send(&on_event, DownloadEvent::Finished),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    pending.package = Some(package);
+    Ok(())
+}
+
+fn send(channel: &Channel<DownloadEvent>, event: DownloadEvent) {
+    // Progress is only for show; the download carries on if the window is gone.
+    if let Err(e) = channel.send(event) {
+        debug!("update progress not delivered: {e}");
+    }
+}
+
+/// Installs the downloaded update. On Windows this never returns: the installer
+/// takes over and the plugin exits the app. On Linux and macOS the files are
+/// replaced in place, and the front end calls [`restart_app`] once nothing would
+/// be cut off.
+#[tauri::command]
+pub async fn install_update(pending: State<'_, PendingUpdate>) -> Result<(), String> {
+    let pending = pending.0.lock().await;
+    let pending = pending.as_ref().ok_or("no update to install")?;
+    let package = pending.package.as_ref().ok_or("update not downloaded")?;
+    // `install` blocks: on Linux it waits for pkexec and the package manager.
+    tokio::task::block_in_place(|| pending.update.install(package)).map_err(|e| e.to_string())
+}
+
+/// Restarts into the version just installed.
+#[tauri::command]
+pub fn restart_app(app: AppHandle) {
     // Goes through ExitRequested, so the RQS service is stopped as on any
     // other exit before the new process starts.
     app.request_restart();
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn v(s: &str) -> Version {
-        Version::parse(s).unwrap()
-    }
-
-    #[test]
-    fn a_later_run_on_the_same_day_is_newer() {
-        assert!(is_newer(&v("1.26.298+43"), &v("1.26.298+42")));
-        // Numbers, not strings: 10 is after 9.
-        assert!(is_newer(&v("1.26.298+10"), &v("1.26.298+9")));
-    }
-
-    #[test]
-    fn a_later_day_or_major_is_newer() {
-        assert!(is_newer(&v("1.26.299+1"), &v("1.26.298+42")));
-        assert!(is_newer(&v("1.27.1+1"), &v("1.26.365+99")));
-        assert!(is_newer(&v("2.26.1+1"), &v("1.26.298+42")));
-    }
-
-    #[test]
-    fn the_same_or_an_older_release_is_not_newer() {
-        assert!(!is_newer(&v("1.26.298+42"), &v("1.26.298+42")));
-        assert!(!is_newer(&v("1.26.298+41"), &v("1.26.298+42")));
-        assert!(!is_newer(&v("1.26.297+99"), &v("1.26.298+42")));
-    }
 }

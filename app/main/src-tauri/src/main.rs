@@ -67,7 +67,9 @@ async fn main() -> Result<(), anyhow::Error> {
         // Opens URLs and received files. Tauri v2's replacement for the
         // shell plugin's `open`, which rejects filesystem paths.
         .plugin(tauri_plugin_opener::init())
-        .plugin(updater::plugin())
+        // In-app updates; the steps are the commands in `updater.rs`.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(updater::PendingUpdate::default())
         .invoke_handler(tauri::generate_handler![
             cmds::change_download_path,
             cmds::change_logging_level,
@@ -83,6 +85,9 @@ async fn main() -> Result<(), anyhow::Error> {
             cmds::send_to_rs,
             cmds::open_received,
             cmds::reveal_received,
+            updater::check_update,
+            updater::download_update,
+            updater::install_update,
             updater::restart_app,
         ])
         .setup(|app| {
@@ -486,13 +491,17 @@ fn main_window_in_view(app_handle: &AppHandle) -> bool {
 }
 
 fn kill_app(app_handle: &AppHandle) {
+    stop_rqs(app_handle);
+    app_handle.exit(-1);
+}
+
+/// Stops the RQS service and waits for it, from sync code on the runtime.
+fn stop_rqs(app_handle: &AppHandle) {
     let state: tauri::State<'_, AppState> = app_handle.state();
 
     tokio::task::block_in_place(|| {
         tauri::async_runtime::block_on(async move {
-            let _ = state.rqs.lock().await.stop().await;
+            state.rqs.lock().await.stop().await;
         });
     });
-
-    app_handle.exit(-1);
 }

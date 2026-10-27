@@ -23,8 +23,6 @@
     "clipboard-manager:allow-read-text",
     "clipboard-manager:allow-write-text",
     "opener:allow-open-url",
-    "opener:allow-default-urls",
-    "updater:allow-check",
-    "updater:allow-download-and-install"
+    "opener:allow-default-urls"
   ]
 }

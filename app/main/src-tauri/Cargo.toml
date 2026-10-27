@@ -33,8 +33,8 @@ tokio = { version = "1.54", features = ["macros", "rt", "rt-multi-thread", "net"
 tauri-plugin-opener = "2.7"
 # Installs a newer release from inside the app. See `updater.rs`.
 tauri-plugin-updater = "2.14"
-# To order release versions the way the Release workflow numbers them.
-semver = "1"
+# For the updater's download progress events.
+serde = { version = "1", features = ["derive"] }
 # `generate_context!` embeds the `plugins` section of tauri.conf.json as
 # serde_json values, and expands to code that names this crate.
 serde_json = "1"

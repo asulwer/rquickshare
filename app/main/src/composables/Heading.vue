@@ -7,16 +7,10 @@ defineProps({
 	vm: {
 		type: Object as PropType<TauriVM>,
 		required: true
-	},
-	openUrl: {
-		type: Function as PropType<(url: string) => void>,
-		required: true
 	}
 });
 
 const emit = defineEmits(['openSettings', 'installUpdate']);
-
-const releasesUrl = 'https://github.com/asulwer/rquickshare/releases/latest';
 </script>
 
 <template>
@@ -33,14 +27,15 @@ const releasesUrl = 'https://github.com/asulwer/rquickshare/releases/latest';
 		<div class="flex justify-center items-center gap-4">
 			<div
 				class="flex items-center gap-2 text-sm transition duration-150 ease-in-out"
-				:class="{'btn active:scale-95': vm.new_version && vm.updateState !== 'installing'}"
-				:title="vm.updateState === 'failed' ? 'The update did not install. Click to download it from the releases page.' : undefined"
-				@click="vm.new_version && (vm.updateState === 'failed' ? openUrl(releasesUrl) : emit('installUpdate'))">
+				:class="{'btn active:scale-95': vm.new_version && (vm.updateState === 'idle' || vm.updateState === 'failed')}"
+				:title="vm.updateState === 'failed' ? 'The update did not install. Click to try again, or download it from Settings > Updates.' : undefined"
+				@click="vm.new_version && emit('installUpdate')">
 				<span v-if="vm.new_version && vm.updateState === 'idle'">Install update</span>
 				<span v-else-if="vm.updateState === 'installing'">
 					Updating{{ vm.updateProgress === null ? '...' : ` ${vm.updateProgress}%` }}
 				</span>
-				<span v-else-if="vm.updateState === 'failed'">Update failed, download it</span>
+				<span v-else-if="vm.updateState === 'waiting'" title="Installs once the current transfer ends">Update waits for transfer</span>
+				<span v-else-if="vm.updateState === 'failed'">Update failed, retry</span>
 				<p v-if="vm.version && !isReleaseBuild(vm.version)" title="Built from source, not a release, so it doesn't check for updates">
 					v{{ vm.version }} dev build
 				</p>

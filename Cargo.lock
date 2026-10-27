@@ -4223,7 +4223,7 @@ dependencies = [
  "notify-rust",
  "qrcode",
  "rqs_lib",
- "semver",
+ "serde",
  "serde_json",
  "tauri",
  "tauri-build",

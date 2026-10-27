@@ -8,10 +8,16 @@ const props = defineProps({
 	vm: {
 		type: Object as PropType<TauriVM>,
 		required: true
+	},
+	openUrl: {
+		type: Function as PropType<(url: string) => void>,
+		required: true
 	}
 });
 
 const emit = defineEmits(['close']);
+
+const releasesUrl = 'https://github.com/asulwer/rquickshare/releases/latest';
 
 // Edited locally and committed on blur or Enter, rather than on every
 // keystroke: each commit re-announces over mDNS, and doing that per character
@@ -60,6 +66,7 @@ function updateStatus(): string {
 	if (vm.updateState === 'installing') {
 		return vm.updateProgress === null ? 'Updating...' : `Updating ${vm.updateProgress}%`;
 	}
+	if (vm.updateState === 'waiting') return 'Update waits for the current transfer to end.';
 	if (vm.updateState === 'failed') return 'The update didn\'t install.';
 	switch (vm.updateCheck) {
 	case 'checking': return 'Checking...';
@@ -218,17 +225,25 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
 			</label>
 			<div class="settings-row">
 				<span class="text-sm" role="status">{{ updateStatus() }}</span>
-				<button
-					v-if="vm.new_version && vm.updateState === 'idle'" type="button" class="btn !h-9 !min-h-9 px-3 shrink-0"
-					@click="utils.installUpdate(vm)">
-					Install
-				</button>
-				<button
-					v-else type="button" class="btn !h-9 !min-h-9 px-3 shrink-0"
-					:disabled="!canUpdate() || vm.updateCheck === 'checking' || vm.updateState === 'installing'"
-					@click="utils.checkForUpdate(vm)">
-					Check now
-				</button>
+				<span class="flex gap-2 shrink-0">
+					<!-- The way out when installing keeps failing. -->
+					<button
+						v-if="vm.updateState === 'failed'" type="button" class="btn !h-9 !min-h-9 px-3"
+						@click="openUrl(releasesUrl)">
+						Download
+					</button>
+					<button
+						v-if="vm.new_version && (vm.updateState === 'idle' || vm.updateState === 'failed')" type="button"
+						class="btn !h-9 !min-h-9 px-3" @click="utils.installUpdate(vm)">
+						{{ vm.updateState === 'failed' ? 'Retry' : 'Install' }}
+					</button>
+					<button
+						v-else type="button" class="btn !h-9 !min-h-9 px-3"
+						:disabled="!canUpdate() || vm.updateCheck === 'checking' || vm.updateState !== 'idle'"
+						@click="utils.checkForUpdate(vm)">
+						Check now
+					</button>
+				</span>
 			</div>
 
 			<h4 class="settings-section">
