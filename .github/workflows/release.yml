@@ -163,15 +163,45 @@ jobs:
     needs: [version, build]
     if: inputs.publish
     runs-on: ubuntu-24.04
-    # Creating the tag and the release, and uploading to it.
     permissions:
+      # Creating the tag and the release, and uploading to it.
       contents: write
+      # The attestation is signed with a certificate GitHub issues to this run
+      # (through its OIDC token), so there is no signing key to keep.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@v7
         with:
           path: installers
           pattern: rquickshare-${{ needs.version.outputs.version }}-*
           merge-multiple: true
+
+      - name: Write SHA256SUMS
+        run: |
+          shopt -s nullglob globstar
+          files=( installers/**/r-quick-share-* )
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::no installers were downloaded"
+            exit 1
+          fi
+          # Bare file names, as the release page lists them, so
+          # `sha256sum -c` works in whatever folder they were downloaded to.
+          for file in "${files[@]}"; do
+            (cd "$(dirname "$file")" && sha256sum "$(basename "$file")")
+          done > SHA256SUMS
+          cat SHA256SUMS
+
+      # Records that this workflow built each installer from this commit.
+      # Anyone can check a download with
+      #   gh attestation verify <file> --repo asulwer/rquickshare
+      # It proves where a file came from; it doesn't stop the Windows or macOS
+      # warnings, which only OS code signing does. Taking the subjects from
+      # SHA256SUMS attests exactly the digests the release publishes.
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-checksums: SHA256SUMS
+
       # The built-in GITHUB_TOKEN: GitHub creates it per run, so there's
       # nothing to renew. gh is preinstalled on GitHub-hosted runners.
       - name: Create the release
@@ -180,11 +210,7 @@ jobs:
           TAG: v${{ needs.version.outputs.version }}
         run: |
           shopt -s nullglob globstar
-          files=( installers/**/r-quick-share-* )
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "::error::no installers were downloaded"
-            exit 1
-          fi
+          files=( installers/**/r-quick-share-* SHA256SUMS )
           printf 'attaching %s\n' "${files[@]}"
           # Tags the exact commit that was built. The notes list the pull
           # requests merged since the previous release.

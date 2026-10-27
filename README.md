@@ -67,6 +67,22 @@ sudo dnf install ./r-quick-share-main_v*.rpm
 sudo rpm -i r-quick-share-main_v*.rpm
 ```
 
+#### Checking a download
+
+Every release lists the SHA-256 of each installer in `SHA256SUMS`, and GitHub keeps a signed record (an attestation) that this repository's Release workflow built each one. This shows the file is the one the release published. It doesn't stop the Windows and macOS warnings above, which only code signing does.
+
+To check the attestation, use the [GitHub CLI](https://cli.github.com/), signed in with `gh auth login`:
+
+```bash
+gh attestation verify r-quick-share-main_v<version>_x64_en-US.msi --repo asulwer/rquickshare
+```
+
+To check only the checksum, compare the hash with the file's line in `SHA256SUMS`:
+
+- Windows (PowerShell): `Get-FileHash .\r-quick-share-main_v<version>_x64_en-US.msi`
+- macOS: `shasum -a 256 r-quick-share-main_v<version>_aarch64.dmg`
+- Linux, with `SHA256SUMS` downloaded next to the package: `sha256sum -c --ignore-missing SHA256SUMS`
+
 ---
 
 How devices connect
