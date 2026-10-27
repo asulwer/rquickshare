@@ -41,6 +41,10 @@ export interface TauriVM {
     updateState: 'idle' | 'installing' | 'failed';
     // Percent downloaded, or null while the size is unknown.
     updateProgress: number | null;
+    // The last check's outcome, for Settings. null until one has run.
+    updateCheck: 'checking' | 'current' | 'available' | 'failed' | null;
+    // Install updates without asking, once no transfer is running.
+    autoUpdate: boolean;
     enable: () => Promise<void>;
     disable: () => Promise<void>;
     invoke: (cmd: string, args?: InvokeArgs) => Promise<unknown>

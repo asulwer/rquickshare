@@ -215,6 +215,7 @@ import { OutboundPayload } from '@martichou/core_lib/bindings/OutboundPayload';
 import { Visibility } from '@martichou/core_lib/bindings/Visibility';
 
 import { ToastNotification, stateToDisplay, autostartKey, DisplayedItem, useToastStore, opt, ToastType, utils } from '../vue_lib';
+import { transferInProgress } from '../vue_lib/updater';
 
 import SettingsModal from '../composables/SettingsModal.vue';
 import Heading from '../composables/Heading.vue';
@@ -304,6 +305,8 @@ export default {
 			new_version: opt<string>(),
 			updateState: ref<'idle' | 'installing' | 'failed'>('idle'),
 			updateProgress: ref<number | null>(null),
+			updateCheck: ref<'checking' | 'current' | 'available' | 'failed' | null>(null),
+			autoUpdate: ref<boolean>(false),
 		};
 	},
 
@@ -329,6 +332,7 @@ export default {
 				await this.getRealclose(this);
 				await this.getStartMinimized(this);
 				await this.getNearbyAlerts(this);
+				await this.getAutoUpdate(this);
 				await this.getClipboardAutosync(this);
 				await this.getDownloadPath(this);
 			} catch (e) {
@@ -502,11 +506,24 @@ export default {
 		displayedItems(): Array<DisplayedItem> {
 			return this.computeDisplayedItems(this);
 		},
+		// With automatic updates on, a found update installs as soon as nothing
+		// would be cut off by the restart. Watched below, so it fires when the
+		// last transfer ends rather than being polled for.
+		autoInstallReady(): boolean {
+			return this.autoUpdate && !!this.new_version && this.updateState === 'idle'
+				&& !transferInProgress(this.requests, this.sending.size);
+		},
 		// Rendered as an <img> rather than v-html: no raw HTML injection.
 		qrDataUri(): string | undefined {
 			if (!this.qrSvg) return undefined;
 
 			return `data:image/svg+xml;utf8,${encodeURIComponent(this.qrSvg)}`;
+		}
+	},
+
+	watch: {
+		autoInstallReady(ready: boolean) {
+			if (ready) this.installUpdate(this);
 		}
 	},
 

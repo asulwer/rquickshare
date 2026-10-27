@@ -1,6 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
 import { check, type DownloadEvent, type Update } from '@tauri-apps/plugin-updater';
+import type { ChannelMessage } from '@martichou/core_lib/bindings/ChannelMessage';
+import type { State } from '@martichou/core_lib/bindings/State';
 import { TauriVM } from './helper/ParamsHelper';
+import { autoUpdateKey } from './types';
 import { displayVersion, isReleaseBuild } from './version';
 
 // The update `check` found, waiting for the user to install it. Kept out of the
@@ -10,16 +13,22 @@ let pending: Update | null = null;
 
 // Asks the updater plugin whether the latest release is newer than this one.
 // The plugin reads the release's latest.json and compares versions in Rust
-// (updater.rs).
+// (updater.rs). Runs at startup and from Settings > Check now.
 export async function checkForUpdate(vm: TauriVM) {
 	// A build that isn't a release has no release to be behind, and no key to
 	// verify one with.
 	if (!vm.version || !isReleaseBuild(vm.version)) return;
+	if (vm.updateCheck === 'checking' || vm.updateState === 'installing') return;
+	vm.updateCheck = 'checking';
+	// Checking again after a failed install is how the user retries it.
+	if (vm.updateState === 'failed') vm.updateState = 'idle';
 	try {
 		pending = await check();
 		vm.new_version = pending ? displayVersion(pending.version) : null;
+		vm.updateCheck = pending ? 'available' : 'current';
 	} catch (err) {
 		console.error('update check failed', err);
+		vm.updateCheck = 'failed';
 	}
 }
 
@@ -40,6 +49,32 @@ export async function installUpdate(vm: TauriVM) {
 		vm.updateState = 'failed';
 	}
 }
+
+// Whether a transfer is under way: connecting, waiting for the user to accept,
+// or moving files. Installing restarts the app, which would cut it off, so an
+// automatic update waits until this turns false.
+export function transferInProgress(requests: ChannelMessage[], connecting: number): boolean {
+	return connecting > 0 || requests.some((r) => !r.state || !FINAL_STATES.includes(r.state));
+}
+
+const FINAL_STATES: State[] = ['Finished', 'Cancelled', 'Rejected', 'Disconnected'];
+
+async function setAutoUpdate(vm: TauriVM, autoUpdate: boolean) {
+	await vm.store.set(autoUpdateKey, autoUpdate);
+	await vm.store.save();
+	vm.autoUpdate = autoUpdate;
+}
+
+async function getAutoUpdate(vm: TauriVM) {
+	vm.autoUpdate = await vm.store.get(autoUpdateKey) ?? false;
+}
+
+export const updaterUtils = {
+	checkForUpdate,
+	installUpdate,
+	setAutoUpdate,
+	getAutoUpdate,
+};
 
 // Turns the download's events into the percent done, or null while the size
 // is unknown (the server sent no Content-Length).

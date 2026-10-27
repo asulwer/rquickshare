@@ -1,5 +1,7 @@
 import { test, assert, describe } from 'vitest'
-import { progressTracker } from '../../src/vue_lib/updater'
+import type { ChannelMessage } from '@martichou/core_lib/bindings/ChannelMessage'
+import type { State } from '@martichou/core_lib/bindings/State'
+import { progressTracker, transferInProgress } from '../../src/vue_lib/updater'
 
 describe('update progress', () => {
 	test('counts chunks against the announced size', () => {
@@ -22,5 +24,22 @@ describe('update progress', () => {
 		assert.isNull(progress({ event: 'Started', data: {} }))
 		assert.isNull(progress({ event: 'Progress', data: { chunkLength: 100 } }))
 		assert.equal(progress({ event: 'Finished' }), 100)
+	})
+})
+
+describe('transfer in progress', () => {
+	const msg = (state?: State) => ({ id: 'a', state } as ChannelMessage)
+
+	test('idle with no transfers, or only finished ones', () => {
+		assert.isFalse(transferInProgress([], 0))
+		assert.isFalse(transferInProgress(['Finished', 'Cancelled', 'Rejected', 'Disconnected'].map((s) => msg(s as State)), 0))
+	})
+
+	test('busy while connecting, waiting for consent or moving files', () => {
+		assert.isTrue(transferInProgress([], 1))
+		assert.isTrue(transferInProgress([msg('WaitingForUserConsent')], 0))
+		assert.isTrue(transferInProgress([msg('Finished'), msg('ReceivingFiles')], 0))
+		assert.isTrue(transferInProgress([msg('SentUkeyServerInit')], 0))
+		assert.isTrue(transferInProgress([msg()], 0))
 	})
 })

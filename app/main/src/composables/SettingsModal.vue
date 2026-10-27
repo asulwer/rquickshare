@@ -2,6 +2,7 @@
 import { loggingLevels, utils } from '../vue_lib';
 import { PropType, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { TauriVM } from '../vue_lib/helper/ParamsHelper';
+import { isReleaseBuild } from '../vue_lib/version';
 
 const props = defineProps({
 	vm: {
@@ -50,6 +51,24 @@ function openDownloadPicker() {
 }
 
 const checked = (e: Event) => (e.target as HTMLInputElement).checked;
+
+const canUpdate = () => !!props.vm.version && isReleaseBuild(props.vm.version);
+
+function updateStatus(): string {
+	const vm = props.vm;
+	if (!canUpdate()) return 'Built from source, so it doesn\'t check for updates.';
+	if (vm.updateState === 'installing') {
+		return vm.updateProgress === null ? 'Updating...' : `Updating ${vm.updateProgress}%`;
+	}
+	if (vm.updateState === 'failed') return 'The update didn\'t install.';
+	switch (vm.updateCheck) {
+	case 'checking': return 'Checking...';
+	case 'available': return `v${vm.new_version} is available.`;
+	case 'current': return `Up to date (v${vm.version}).`;
+	case 'failed': return 'Couldn\'t check for updates.';
+	default: return `v${vm.version}`;
+	}
+}
 
 const dialog = ref<HTMLElement | null>(null);
 // Whatever had focus when the dialog opened (the gear button), so closing
@@ -181,6 +200,36 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
 					type="checkbox" role="switch" class="switch" :checked="!vm.realclose"
 					@change="utils.setRealClose(vm, !checked($event))">
 			</label>
+
+			<h4 class="settings-section">
+				Updates
+			</h4>
+			<label class="settings-row" :class="canUpdate() ? 'cursor-pointer' : 'opacity-50'">
+				<span class="flex flex-col">
+					<span>Install updates automatically</span>
+					<span class="text-xs opacity-70">
+						Installs a new release once no transfer is running, then restarts. On Linux it asks for your password first.
+					</span>
+				</span>
+				<input
+					type="checkbox" role="switch" class="switch" :checked="vm.autoUpdate"
+					:disabled="!canUpdate()"
+					@change="utils.setAutoUpdate(vm, checked($event))">
+			</label>
+			<div class="settings-row">
+				<span class="text-sm" role="status">{{ updateStatus() }}</span>
+				<button
+					v-if="vm.new_version && vm.updateState === 'idle'" type="button" class="btn !h-9 !min-h-9 px-3 shrink-0"
+					@click="utils.installUpdate(vm)">
+					Install
+				</button>
+				<button
+					v-else type="button" class="btn !h-9 !min-h-9 px-3 shrink-0"
+					:disabled="!canUpdate() || vm.updateCheck === 'checking' || vm.updateState === 'installing'"
+					@click="utils.checkForUpdate(vm)">
+					Check now
+				</button>
+			</div>
 
 			<h4 class="settings-section">
 				Advanced

@@ -5,7 +5,7 @@ import { SendInfo } from '@martichou/core_lib/bindings/SendInfo';
 import { ChannelMessage } from '@martichou/core_lib/bindings/ChannelMessage';
 import { ChannelAction } from '@martichou/core_lib/bindings/ChannelAction';
 import { displayVersion } from './version';
-import { checkForUpdate, installUpdate } from './updater';
+import { updaterUtils } from './updater';
 
 // Not `_`-prefixed: setup() exposes this on the component, and Vue reserves the
 // `_` and `$` prefixes for its internals (it warns and skips them).
@@ -263,8 +263,7 @@ export const utils = {
 	getDownloadPath,
 	setDeviceName,
 	getDeviceName,
-	checkForUpdate,
-	installUpdate,
+	...updaterUtils,
 	displayVersion,
 	setStartMinimized,
 	getStartMinimized,
