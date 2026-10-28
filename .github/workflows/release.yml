@@ -11,8 +11,8 @@ name: Release
 #   build  This workflow's run number. It only goes up, so two releases on the
 #          same day still get increasing versions.
 #
-# The tag, the release, the installer file names, the .msi and .exe installers
-# and the version the app shows all read 1.26.298.42. Cargo only takes three
+# The tag, the release, the installer file names, the Windows installer and
+# the version the app shows all read 1.26.298.42. Cargo only takes three
 # numbers, so Cargo.toml gets 1.26.298+42 and Tauri turns the +42 back into the
 # fourth number for the Windows installers.
 on:
@@ -53,9 +53,10 @@ jobs:
             echo "::error::could not read the major version from [workspace.package] in Cargo.toml"
             exit 1
           fi
-          # The .msi caps the first two numbers at 255 and the others at 65535.
-          if [ "$major" -gt 255 ]; then
-            echo "::error::major version ${major} is over 255, the most an .msi allows"
+          # A Windows file version caps each number at 65535. (The .msi capped
+          # the first two at 255, but no .msi is built any more.)
+          if [ "$major" -gt 65535 ]; then
+            echo "::error::major version ${major} is over 65535, the most a Windows file version allows"
             exit 1
           fi
           if [ "$RUN_NUMBER" -gt 65535 ]; then
@@ -97,7 +98,11 @@ jobs:
           # Apple Silicon. macos-13 (the Intel image) was retired: its jobs sat
           # queued for 24h and were cancelled, never running.
           - os: macos-latest
+          # Only the -setup.exe (NSIS). The .msi installed the same app; the
+          # .exe is smaller and, with installMode "both" in tauri.conf.json,
+          # offers the same Program Files install for all users.
           - os: windows-latest
+            bundles: nsis
     env:
       TARGET_PATH: app/main
       # The repo is a Cargo workspace, so build output lands in the root

@@ -29,7 +29,9 @@ The installers aren't code-signed yet, so Windows and macOS will warn you the fi
 
 #### Windows 11
 
-Run either installer: `r-quick-share-main_v<version>_x64_en-US.msi`, or `r-quick-share-main_v<version>_x64-setup.exe`.
+Run `r-quick-share-main_v<version>_x64-setup.exe`. It asks whether to install for you only or for everyone on the computer (in Program Files). Either way Windows asks for administrator permission.
+
+Earlier releases also had an `.msi` installer. If you installed from the `.msi`, uninstall it first (Settings > Apps > Installed apps), or you'll end up with two copies.
 
 - Windows SmartScreen may say it "protected your PC", because the installer isn't signed. Click **More info**, then **Run anyway**.
 - Windows Firewall will ask whether to allow rquickshare the first time it runs. Allow it on **Private** networks, otherwise your phone can't reach it over Wi-Fi.
@@ -74,12 +76,12 @@ Every release lists the SHA-256 of each installer in `SHA256SUMS`, and GitHub ke
 To check the attestation, use the [GitHub CLI](https://cli.github.com/), signed in with `gh auth login`:
 
 ```bash
-gh attestation verify r-quick-share-main_v<version>_x64_en-US.msi --repo asulwer/rquickshare
+gh attestation verify r-quick-share-main_v<version>_x64-setup.exe --repo asulwer/rquickshare
 ```
 
 To check only the checksum, compare the hash with the file's line in `SHA256SUMS`:
 
-- Windows (PowerShell): `Get-FileHash .\r-quick-share-main_v<version>_x64_en-US.msi`
+- Windows (PowerShell): `Get-FileHash .\r-quick-share-main_v<version>_x64-setup.exe`
 - macOS: `shasum -a 256 r-quick-share-main_v<version>_aarch64.dmg`
 - Linux, with `SHA256SUMS` downloaded next to the package: `sha256sum -c --ignore-missing SHA256SUMS`
 
