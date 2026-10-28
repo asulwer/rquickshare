@@ -800,6 +800,25 @@ impl BleReceiverAdvertiser {
             unsafe {
                 let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             }
+            let runtime = tokio::runtime::Handle::current();
+
+            // With Bluetooth off, CreateAsync fails (RadioNotAvailable), and
+            // this task used to end there: a PC started before Bluetooth was
+            // turned on stayed undiscoverable over BLE until the app restarted.
+            // Wait for the radio first; once advertising, the loop below
+            // handles it going off and on again.
+            if !crate::hdl::bluetooth_is_on() {
+                info!("{INNER_NAME}: Bluetooth is off; advertising once it is turned on");
+            }
+            let on = runtime.block_on(async {
+                tokio::select! {
+                    _ = crate::hdl::bluetooth_on() => true,
+                    _ = ctk.cancelled() => false,
+                }
+            });
+            if !on {
+                return Ok(());
+            }
 
             // Create the GATT service provider for 0xFEF3.
             let create_result =
@@ -1330,7 +1349,6 @@ impl BleReceiverAdvertiser {
             let in_flight = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
             let mut next_indication: u64 = 0;
 
-            let runtime = tokio::runtime::Handle::current();
             let mut sends = crate::hdl::ble_sends();
             // Set while a recycle waits for the lingering phone to go.
             let mut recycling: Option<tokio::time::Instant> = None;
