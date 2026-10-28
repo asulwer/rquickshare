@@ -32,7 +32,9 @@ jobs:
           # Apple Silicon. macos-13 (the Intel image) was retired: its jobs sat
           # queued for 24h and were cancelled, never running.
           - os: macos-latest
+          # Only the -setup.exe, the one installer release.yml ships.
           - os: windows-latest
+            bundles: nsis
     env:
       TARGET_PATH: app/main
       # The repo is a Cargo workspace, so build output lands in the root
