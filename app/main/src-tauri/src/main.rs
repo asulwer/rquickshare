@@ -6,6 +6,7 @@
 #[macro_use]
 extern crate log;
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use rqs_lib::channel::{ChannelDirection, ChannelMessage, TransferType};
@@ -49,8 +50,18 @@ async fn main() -> Result<(), anyhow::Error> {
     // Define tauri async runtime to be tokio
     tauri::async_runtime::set(tokio::runtime::Handle::current());
 
+    // Files to send, from the command line or "Open With". Read before
+    // anything else so they are queued by the time the front end asks.
+    let launch_args: Vec<String> = std::env::args().skip(1).collect();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let launch_files = cmds::files_from_args(&launch_args, &cwd);
+    // Started to send something, so show the window even if the user has the
+    // app start minimized.
+    let show_on_start = !launch_files.is_empty();
+
     // Build and run Tauri app
     tauri::Builder::default()
+        .manage(cmds::LaunchFiles::new(launch_files))
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_autostart::init(
@@ -58,8 +69,11 @@ async fn main() -> Result<(), anyhow::Error> {
             None,
         ))
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, cwd| {
             trace!("tauri_plugin_single_instance: instance already running");
+            // A second launch with files ("Open With", a script) hands them
+            // to this copy instead of starting another.
+            cmds::add_launch_files(app, argv.get(1..).unwrap_or_default(), Path::new(&cwd));
             open_main_window(app);
         }))
         .plugin(tauri_plugin_dialog::init())
@@ -79,6 +93,7 @@ async fn main() -> Result<(), anyhow::Error> {
             cmds::change_device_name,
             cmds::send_payload,
             cmds::send_to_rs,
+            cmds::take_launch_files,
             cmds::open_received,
             cmds::reveal_received,
         ])
@@ -144,10 +159,10 @@ async fn main() -> Result<(), anyhow::Error> {
         .on_window_event(handle_window_event)
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app_handle, event| match event {
+        .run(move |app_handle, event| match event {
             tauri::RunEvent::Ready => {
                 trace!("RunEvent::Ready");
-                if get_startminimized(app_handle) {
+                if get_startminimized(app_handle) && !show_on_start {
                     #[cfg(not(target_os = "macos"))]
                     app_handle
                         .get_webview_window("main")

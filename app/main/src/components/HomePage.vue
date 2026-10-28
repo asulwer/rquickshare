@@ -430,6 +430,12 @@ export default {
 				})
 			);
 
+			// Files from the command line, "Open With" or a drop on the app's
+			// icon wait in the backend until taken: once now, for the launch
+			// that started us, and again each time another launch adds some.
+			this.unlisten.push(await listen('launch_files', () => this.stageLaunchFiles()));
+			await this.stageLaunchFiles();
+
 			// Ctrl/Cmd+V pastes clipboard text and stages it to send.
 			const onPaste = async (e: KeyboardEvent) => {
 				if (!(e.ctrlKey || e.metaKey) || (e.key !== 'v' && e.key !== 'V')) return;
@@ -526,6 +532,14 @@ export default {
 				this.discoveryRunning = false;
 				throw e;
 			}
+		},
+		// Loads files handed to the app at launch as the ones to send, like a
+		// drop. Nothing is sent until a device is picked or the QR is scanned.
+		stageLaunchFiles: async function() {
+			const files = await invoke<string[]>('take_launch_files');
+			if (files.length === 0) return;
+			this.outboundPayload = { Files: files } as OutboundPayload;
+			await this.startDiscovery();
 		},
 		pluralize: function(n: number, noun: string): string {
 			return `${n} ${n === 1 ? noun : `${noun}s`}`;
