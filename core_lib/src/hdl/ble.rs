@@ -665,6 +665,19 @@ pub(crate) fn bluetooth_is_on() -> bool {
 /// already doesn't count.
 #[cfg(target_os = "windows")]
 pub(crate) async fn bluetooth_turned_on() {
+    radio_on(false).await
+}
+
+/// Resolves once the Bluetooth radio is on: at once if it already is,
+/// otherwise when it turns on. Never resolves without a Bluetooth adapter.
+#[cfg(target_os = "windows")]
+pub(crate) async fn bluetooth_on() {
+    radio_on(true).await
+}
+
+/// Waits for the radio to turn on, or with `on_now_counts` for it to be on.
+#[cfg(target_os = "windows")]
+async fn radio_on(on_now_counts: bool) {
     use windows::core::IInspectable;
     use windows::Devices::Bluetooth::BluetoothAdapter;
     use windows::Devices::Radios::{Radio, RadioState};
@@ -702,6 +715,9 @@ pub(crate) async fn bluetooth_turned_on() {
             let _subscription = Subscription(radio.clone(), token);
             // Read after subscribing, so a change in between isn't missed.
             let mut on = radio.State().is_ok_and(|s| s == RadioState::On);
+            if on && on_now_counts {
+                return;
+            }
             while let Some(state) = states.recv().await {
                 if state == RadioState::On && !on {
                     return;
