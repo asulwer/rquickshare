@@ -10,6 +10,8 @@ mod discovery;
 pub use discovery::*;
 mod get_hostname;
 pub use get_hostname::*;
+mod launch_files;
+pub use launch_files::*;
 mod nearby_alerts;
 pub use nearby_alerts::*;
 mod received;
