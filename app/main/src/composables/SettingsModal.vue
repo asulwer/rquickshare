@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { loggingLevels, utils } from '../vue_lib';
-import { PropType, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { PropType, ref, watch } from 'vue';
 import { TauriVM } from '../vue_lib/helper/ParamsHelper';
+import { useModalDialog } from '../vue_lib/modalDialog';
+import { isReleaseBuild } from '../vue_lib/version';
 
 const props = defineProps({
 	vm: {
@@ -51,22 +53,6 @@ function openDownloadPicker() {
 
 const checked = (e: Event) => (e.target as HTMLInputElement).checked;
 
-const dialog = ref<HTMLElement | null>(null);
-// Whatever had focus when the dialog opened (the gear button), so closing
-// hands focus back instead of dropping it on <body>.
-let returnFocus: HTMLElement | null = null;
-
-watch(() => props.vm.settingsOpen, async (open) => {
-	if (open) {
-		returnFocus = document.activeElement as HTMLElement | null;
-		await nextTick();
-		dialog.value?.focus();
-	} else {
-		returnFocus?.focus();
-		returnFocus = null;
-	}
-});
-
 // Every way out goes through here. Closing removes the name field without
 // blurring it, so a name typed and then dismissed with Escape would otherwise
 // be lost; the Close button only kept it because clicking it blurred the field.
@@ -75,35 +61,7 @@ async function close() {
 	emit('close');
 }
 
-function onKeydown(e: KeyboardEvent) {
-	if (!props.vm.settingsOpen) return;
-
-	if (e.key === 'Escape') {
-		e.preventDefault();
-		close();
-		return;
-	}
-
-	// Keep Tab inside the dialog: the page behind it is covered and can't be used.
-	if (e.key === 'Tab' && dialog.value) {
-		const focusable = Array.from(dialog.value.querySelectorAll<HTMLElement>('button, input, select'));
-		if (focusable.length === 0) return;
-
-		const first = focusable[0];
-		const last = focusable[focusable.length - 1];
-		const active = document.activeElement;
-		if (e.shiftKey && (active === first || active === dialog.value)) {
-			e.preventDefault();
-			last.focus();
-		} else if (!e.shiftKey && active === last) {
-			e.preventDefault();
-			first.focus();
-		}
-	}
-}
-
-onMounted(() => window.addEventListener('keydown', onKeydown));
-onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
+useModalDialog(() => props.vm.settingsOpen, close);
 </script>
 
 <template>
@@ -224,6 +182,17 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown));
 					</option>
 				</select>
 			</label>
+
+			<h4 class="settings-section">
+				About
+			</h4>
+			<div class="settings-row">
+				<span class="flex flex-col">
+					<span>Version</span>
+					<span v-if="vm.version && !isReleaseBuild(vm.version)" class="text-xs opacity-70">Built from source, not a release, so it doesn't check for updates.</span>
+				</span>
+				<span class="text-sm">v{{ vm.version }}</span>
+			</div>
 		</div>
 	</div>
 </template>

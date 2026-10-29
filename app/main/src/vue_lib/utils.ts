@@ -4,7 +4,8 @@ import { autostartKey, clipboardAutosyncKey, debugLevelKey, DisplayedItem, downl
 import { SendInfo } from '@martichou/core_lib/bindings/SendInfo';
 import { ChannelMessage } from '@martichou/core_lib/bindings/ChannelMessage';
 import { ChannelAction } from '@martichou/core_lib/bindings/ChannelAction';
-import { displayVersion, isNewerVersion, isReleaseBuild } from './version';
+import { displayVersion, isReleaseBuild } from './version';
+import { releasesSince } from './releases';
 
 // Not `_`-prefixed: setup() exposes this on the component, and Vue reserves the
 // `_` and `$` prefixes for its internals (it warns and skips them).
@@ -245,17 +246,16 @@ async function getLatestVersion(vm: TauriVM) {
 	// A build that isn't a release has no release to be behind.
 	if (!vm.version || !isReleaseBuild(vm.version)) return;
 	try {
-		const response = await fetch('https://api.github.com/repos/asulwer/rquickshare/releases/latest');
+		// Every recent release rather than just the latest, so someone a few
+		// releases behind sees all the changes they'd get.
+		const response = await fetch('https://api.github.com/repos/asulwer/rquickshare/releases?per_page=30');
 		if (!response.ok) {
 			throw new Error(`Error: ${response.status} ${response.statusText}`);
 		}
-		const data = await response.json();
-		const new_version = data.tag_name.substring(1);
-		console.log(`Latest version: ${vm.version} vs ${new_version}`);
-
-		if (isNewerVersion(new_version, vm.version)) {
-			vm.new_version = new_version;
-		}
+		const releases = releasesSince(await response.json(), vm.version);
+		vm.releaseNotes = releases;
+		vm.new_version = releases[0]?.version ?? null;
+		console.log(`Latest version: ${vm.version} vs ${vm.new_version ?? 'none newer'}`);
 	} catch (err) {
 		console.error(err);
 	}

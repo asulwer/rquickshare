@@ -1,20 +1,15 @@
 <script setup lang="ts">
 import { PropType } from 'vue';
 import { TauriVM } from '../vue_lib/helper/ParamsHelper';
-import { isReleaseBuild } from '../vue_lib/version';
 
 defineProps({
 	vm: {
 		type: Object as PropType<TauriVM>,
 		required: true
-	},
-	openUrl: {
-		type: Function as PropType<(url: string) => void>,
-		required: true
 	}
 });
 
-const emit = defineEmits(['openSettings']);
+const emit = defineEmits(['openSettings', 'openUpdate']);
 </script>
 
 <template>
@@ -29,24 +24,15 @@ const emit = defineEmits(['openSettings']);
 			</h2>
 		</div>
 		<div class="flex justify-center items-center gap-4">
-			<div
-				class="flex items-center gap-2 text-sm transition duration-150 ease-in-out"
-				:class="{'btn active:scale-95': vm.new_version}"
-				@click="vm.new_version && openUrl('https://github.com/asulwer/rquickshare/releases/latest')">
-				<span v-if="vm.new_version">Update available</span>
-				<p v-if="vm.version && !isReleaseBuild(vm.version)" title="Built from source, not a release, so it doesn't check for updates">
-					v{{ vm.version }} dev build
-				</p>
-				<p v-else>
-					v{{ vm.version }}
-				</p>
-				<p v-if="vm.new_version" class="text-lg">
-					→
-				</p>
-				<p v-if="vm.new_version">
-					v{{ vm.new_version }}
-				</p>
-			</div>
+			<button
+				v-if="vm.new_version" type="button" aria-label="Update available" :title="`Update available: v${vm.new_version}`"
+				class="btn px-3 rounded-xl active:scale-95 transition duration-150 ease-in-out" @click="emit('openUpdate')">
+				<svg
+					xmlns="http://www.w3.org/2000/svg" fill="currentColor" height="24"
+					viewBox="0 -960 960 960" width="24">
+					<path d="M440-320h80v-168l64 64 56-56-160-160-160 160 56 56 64-64v168Zm40 240q-83 0-156-31.5T197-197q-54-54-85.5-127T80-480q0-83 31.5-156T197-763q54-54 127-85.5T480-880q83 0 156 31.5T763-763q54 54 85.5 127T880-480q0 83-31.5 156T763-197q-54 54-127 85.5T480-80Zm0-80q134 0 227-93t93-227q0-134-93-227t-227-93q-134 0-227 93t-93 227q0 134 93 227t227 93Zm0-320Z" />
+				</svg>
+			</button>
 			<button type="button" aria-label="Settings" class="btn px-3 rounded-xl active:scale-95 transition duration-150 ease-in-out" @click="emit('openSettings')">
 				<svg
 					xmlns="http://www.w3.org/2000/svg" fill="currentColor" height="24"

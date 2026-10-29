@@ -2,8 +2,9 @@
 	<div class="flex flex-col w-full h-full bg-green-50 dark:bg-neutral-900 max-w-full max-h-full overflow-hidden">
 		<ToastNotification />
 		<SettingsModal :vm="vm" @close="settingsOpen = false" />
+		<UpdateModal :vm="vm" :open-url="openUrl" @close="updateOpen = false" />
 
-		<Heading :vm="vm" :open-url="openUrl" @open-settings="settingsOpen = true" />
+		<Heading :vm="vm" @open-settings="settingsOpen = true" @open-update="updateOpen = true" />
 
 		<div class="flex-1 flex flex-row">
 			<SideMenu :vm="vm" @invert-visibility="invertVisibility(vm)" @clear-sending="stopSending()" />
@@ -217,11 +218,13 @@ import { Visibility } from '@martichou/core_lib/bindings/Visibility';
 import { ToastNotification, stateToDisplay, autostartKey, DisplayedItem, useToastStore, opt, ToastType, utils } from '../vue_lib';
 
 import SettingsModal from '../composables/SettingsModal.vue';
+import UpdateModal from '../composables/UpdateModal.vue';
 import Heading from '../composables/Heading.vue';
 import SideMenu from '../composables/SideMenu.vue';
 import ContentStatus from '../composables/ContentStatus.vue';
 import ItemSide from '../composables/ItemSide.vue';
 import FileList from '../composables/FileList.vue';
+import type { ReleaseNotes } from '../vue_lib/releases';
 
 export default {
 	name: "HomePage",
@@ -229,6 +232,7 @@ export default {
 	components: {
 		ToastNotification,
 		SettingsModal,
+		UpdateModal,
 		Heading,
 		SideMenu,
 		ContentStatus,
@@ -302,6 +306,8 @@ export default {
 			settingsOpen: ref<boolean>(false),
 
 			new_version: opt<string>(),
+			releaseNotes: ref<ReleaseNotes[]>([]),
+			updateOpen: ref<boolean>(false),
 		};
 	},
 

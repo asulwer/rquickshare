@@ -3,6 +3,7 @@ import type { InvokeArgs } from '@tauri-apps/api/core';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 
 import type { DisplayedItem } from '../types';
+import type { ReleaseNotes } from '../releases';
 
 import type { EndpointInfo } from '@martichou/core_lib/bindings/EndpointInfo';
 import type { Visibility } from '@martichou/core_lib/bindings/Visibility';
@@ -36,6 +37,9 @@ export interface TauriVM {
     hostnameDefault: string | undefined;
     settingsOpen: boolean;
     new_version: string | null;
+    // What changed in each release since this one, newest first.
+    releaseNotes: ReleaseNotes[];
+    updateOpen: boolean;
     enable: () => Promise<void>;
     disable: () => Promise<void>;
     invoke: (cmd: string, args?: InvokeArgs) => Promise<unknown>
