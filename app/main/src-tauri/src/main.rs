@@ -46,6 +46,9 @@ pub struct AppState {
     /// The latest of every transfer sent to the front end, for a window
     /// created after closing to the tray destroyed the last one.
     pub transfers: std::sync::Mutex<Vec<ChannelMessage>>,
+    /// What the page had staged, kept for a window created after closing to
+    /// the tray destroyed the last one.
+    pub page: std::sync::Mutex<cmds::PageState>,
 }
 
 #[tokio::main]
@@ -101,6 +104,8 @@ async fn main() -> Result<(), anyhow::Error> {
             cmds::reveal_received,
             cmds::get_transfers,
             cmds::forget_transfer,
+            cmds::get_page_state,
+            cmds::set_page_state,
         ])
         .setup(|app| {
             // Setting up logging inside file for the app
@@ -148,6 +153,7 @@ async fn main() -> Result<(), anyhow::Error> {
                         ble_receiver,
                         rqs: AsyncMutex::new(rqs),
                         received: Default::default(),
+                        page: Default::default(),
                         transfers: Default::default(),
                     });
                 });
@@ -166,7 +172,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 // so starting minimized means never building the webview.
                 // Files passed at launch show it anyway.
                 if !get_startminimized(app_handle) || show_on_start {
-                    create_main_window(app_handle);
+                    spawn_main_window(app_handle);
                 }
             }
             tauri::RunEvent::ExitRequested { code, api, .. } => {
@@ -210,7 +216,7 @@ async fn main() -> Result<(), anyhow::Error> {
 /// child still receives everything the header bar doesn't want, so dragging the
 /// bar to move the window keeps working.
 ///
-/// Delete this function, its call in `setup`, and the `gtk` dependency once
+/// Delete this function, its call in `create_main_window`, and the `gtk` dependency once
 /// `tauri-runtime-wry` requires tao 0.36 or later. As of 2.11.4 it still asks
 /// for `^0.35.0`, which excludes the fix.
 ///
@@ -456,13 +462,6 @@ fn main_window_destroyed(app_handle: &AppHandle) {
 /// Give back what the destroyed webview leaves behind once closed to the tray.
 #[cfg(target_os = "linux")]
 fn release_webview_memory() {
-    // WebKitGTK never stops its network process, and Tauri keeps the web
-    // context alive on Linux on purpose so reopening reuses it instead of
-    // leaking a new one (tauri-apps/tauri#14626). With no webview left it
-    // only holds memory (~18 MB); WebKit starts a fresh one when the next
-    // window loads.
-    stop_child_process("WebKitNetworkPr");
-
     // glibc keeps the freed webview allocations in its heap; hand them back
     // to the OS.
     #[cfg(target_env = "gnu")]
@@ -470,43 +469,6 @@ fn release_webview_memory() {
         // SAFETY: malloc_trim only walks the allocator's own free lists.
         let released = unsafe { libc::malloc_trim(0) };
         trace!("release_webview_memory: malloc_trim released={released}");
-    }
-}
-
-/// SIGTERM our own child processes whose `comm` (truncated by the kernel to
-/// 15 bytes) is `comm`.
-#[cfg(target_os = "linux")]
-fn stop_child_process(comm: &str) {
-    let me = std::process::id();
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|n| n.parse::<i32>().ok())
-        else {
-            continue;
-        };
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-            continue;
-        };
-        // `pid (comm) state ppid ...`; comm may hold spaces or parens, so
-        // split at the last ')'.
-        let Some((head, rest)) = stat.rsplit_once(')') else {
-            continue;
-        };
-        let name = head.split_once('(').map(|(_, n)| n);
-        let ppid = rest
-            .split_whitespace()
-            .nth(1)
-            .and_then(|p| p.parse::<u32>().ok());
-        if name == Some(comm) && ppid == Some(me) {
-            // SAFETY: plain kill(2) on a pid we just saw as our own child.
-            let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
-            debug!("stop_child_process: SIGTERM {comm} ({pid}) rc={rc}");
-        }
     }
 }
 
@@ -541,10 +503,17 @@ fn rs2js_channelmessage(message: ChannelMessage, manager: &AppHandle) {
         info!("rs2js_channelmessage: {message:?}");
     }
     if let Some(state) = manager.try_state::<AppState>() {
-        cmds::remember_transfer(
+        let evicted = cmds::remember_transfer(
             &mut state.transfers.lock().unwrap_or_else(|e| e.into_inner()),
             &message,
         );
+        if let Some(id) = evicted {
+            state
+                .received
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&id);
+        }
     }
     manager.emit("rs2js_channelmessage", &message).unwrap();
 }
@@ -556,18 +525,40 @@ fn rs2js_endpointinfo(message: EndpointInfo, manager: &AppHandle) {
 
 fn open_main_window(app_handle: &AppHandle) {
     if let Some(webview_window) = app_handle.get_webview_window("main") {
-        let _ = webview_window.show();
-        let _ = webview_window.set_focus();
-        // Showing from the tray or a second launch doesn't always raise a
-        // `Focused` event, so re-announce here too.
-        reannounce(app_handle);
+        if let Err(e) = webview_window.show() {
+            warn!("open_main_window: show: {e}");
+        }
+        focus_main_window(&webview_window);
         return;
     }
 
-    if let Some(w) = create_main_window(app_handle) {
-        let _ = w.set_focus();
-        reannounce(app_handle);
+    spawn_main_window(app_handle);
+}
+
+fn focus_main_window(w: &tauri::WebviewWindow) {
+    if let Err(e) = w.set_focus() {
+        warn!("focus_main_window: {e}");
     }
+    // Showing from the tray or a second launch doesn't always raise a
+    // `Focused` event, so re-announce here too.
+    reannounce(w.app_handle());
+}
+
+/// Build the main window on a blocking-pool thread. Every caller is on the
+/// main thread (`RunEvent::Ready`, the tray menu, the second-launch callback),
+/// and building a window from there deadlocks on Windows: `build` waits for
+/// the event loop that the caller is blocking (tauri-apps/wry#583).
+fn spawn_main_window(app_handle: &AppHandle) {
+    let app_handle = app_handle.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // A second open while the first build was queued already made it.
+        if app_handle.get_webview_window("main").is_some() {
+            return;
+        }
+        if let Some(w) = create_main_window(&app_handle) {
+            focus_main_window(&w);
+        }
+    });
 }
 
 /// Build the main window from its entry in tauri.conf.json.
@@ -581,8 +572,15 @@ fn create_main_window(app_handle: &AppHandle) -> Option<tauri::WebviewWindow> {
         .clone();
     match tauri::WebviewWindowBuilder::from_config(app_handle, &config).and_then(|b| b.build()) {
         Ok(w) => {
+            // GTK objects may only be touched on the main thread, and this
+            // runs off it (see `spawn_main_window`).
             #[cfg(target_os = "linux")]
-            fix_wayland_titlebar(&w);
+            {
+                let gw = w.clone();
+                if let Err(e) = w.run_on_main_thread(move || fix_wayland_titlebar(&gw)) {
+                    warn!("create_main_window: titlebar fix: {e}");
+                }
+            }
             Some(w)
         }
         Err(e) => {

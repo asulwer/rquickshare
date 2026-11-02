@@ -19,6 +19,7 @@ humantime = "2.4"
 log = "0.4.34"
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 rqs_lib = { path = "../../../core_lib", features = ["experimental"] }
+serde = { version = "1.0.229", features = ["derive"] }
 # No "devtools": debug builds always have the inspector, and release builds
 # shouldn't ship it.
 tauri = { version = "2.12", features = ["tray-icon", "image-png"] }

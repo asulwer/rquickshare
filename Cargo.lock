@@ -4093,6 +4093,7 @@ dependencies = [
  "notify-rust",
  "qrcode",
  "rqs_lib",
+ "serde",
  "tauri",
  "tauri-build",
  "tauri-plugin-autostart",

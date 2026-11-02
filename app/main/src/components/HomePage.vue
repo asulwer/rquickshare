@@ -215,7 +215,7 @@ import { OutboundPayload } from '@martichou/core_lib/bindings/OutboundPayload';
 import { Visibility } from '@martichou/core_lib/bindings/Visibility';
 
 import { ToastNotification, stateToDisplay, autostartKey, DisplayedItem, useToastStore, opt, ToastType, utils } from '../vue_lib';
-import { addMissingTransfers } from '../vue_lib/transfers';
+import { addMissingTransfers, PageState } from '../vue_lib/transfers';
 
 import SettingsModal from '../composables/SettingsModal.vue';
 import Heading from '../composables/Heading.vue';
@@ -422,6 +422,20 @@ export default {
 				console.error('[rqs] could not load transfers:', e);
 			}
 
+			// What was staged to send before the window closed to the tray, and
+			// the clipboard text auto-sync already took. Before the launch files
+			// below, which replace a staged send.
+			try {
+				const page = await this.invoke('get_page_state') as PageState;
+				this.lastClipboard = page.last_clipboard ?? undefined;
+				if (page.outbound_payload) {
+					this.outboundPayload = page.outbound_payload;
+					await this.startDiscovery();
+				}
+			} catch (e) {
+				console.error('[rqs] could not load the staged send:', e);
+			}
+
 			this.unlisten.push(
 				await getCurrentWindow().onDragDropEvent(async (event) => {
 					if (event.payload.type === 'over') {
@@ -505,6 +519,17 @@ export default {
 		this.unlisten.forEach((el) => el());
 	},
 
+	// Mirror what's staged in the backend as it changes, so a window opened
+	// after closing to the tray gets it back.
+	watch: {
+		outboundPayload() {
+			this.savePageState();
+		},
+		lastClipboard() {
+			this.savePageState();
+		},
+	},
+
 	computed: {
 		vm() {
 			return this;
@@ -524,6 +549,15 @@ export default {
 	},
 
 	methods: {
+		savePageState: function() {
+			const page: PageState = {
+				outbound_payload: this.outboundPayload ?? null,
+				last_clipboard: this.lastClipboard ?? null,
+			};
+			this.invoke('set_page_state', { page }).catch((e: unknown) => {
+				console.error('[rqs] could not save the staged send:', e);
+			});
+		},
 		// Discovery is what makes us visible and produces the pairing QR. It is
 		// idempotent from the caller's side: several UI paths stage a payload and
 		// all of them need discovery up, but only the first should actually start
