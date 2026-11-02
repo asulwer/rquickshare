@@ -37,6 +37,7 @@ tauri-plugin-opener = "2.7"
 # `fix_wayland_titlebar`. Same version tauri itself already pulls in.
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
+libc = "0.2"
 # Linux notifications with Accept/Reject buttons; elsewhere the Tauri
 # notification plugin is used.
 notify-rust = "4.18"

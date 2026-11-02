@@ -215,6 +215,7 @@ import { OutboundPayload } from '@martichou/core_lib/bindings/OutboundPayload';
 import { Visibility } from '@martichou/core_lib/bindings/Visibility';
 
 import { ToastNotification, stateToDisplay, autostartKey, DisplayedItem, useToastStore, opt, ToastType, utils } from '../vue_lib';
+import { addMissingTransfers } from '../vue_lib/transfers';
 
 import SettingsModal from '../composables/SettingsModal.vue';
 import Heading from '../composables/Heading.vue';
@@ -412,6 +413,14 @@ export default {
 					await this.getVisibility(this);
 				})
 			);
+
+			// After the listeners, so nothing sent in between is missed: the
+			// transfers that happened while the window was closed to the tray.
+			try {
+				addMissingTransfers(this.requests, await this.invoke('get_transfers') as ChannelMessage[]);
+			} catch (e) {
+				console.error('[rqs] could not load transfers:', e);
+			}
 
 			this.unlisten.push(
 				await getCurrentWindow().onDragDropEvent(async (event) => {
