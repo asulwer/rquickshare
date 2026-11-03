@@ -199,57 +199,6 @@ async fn main() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Make the titlebar buttons clickable again under Wayland.
-///
-/// GNOME leaves decorations to the client, so on Wayland tao doesn't use GTK's
-/// own titlebar: it builds a `HeaderBar` and hands it to `set_titlebar` wrapped
-/// in a `GtkEventBox` with `above-child` set. That flag puts the event box's own
-/// GdkWindow *over* its child's, so the box receives every button press and the
-/// minimise/maximise/close buttons underneath never see one - they render, they
-/// prelight, and they do nothing. Maximising the window is the one state where
-/// the clicks get through, which is why the buttons come alive when the window
-/// is maximised and go dead again as soon as it is restored.
-///
-/// Upstream dropped these custom decorations entirely in tao 0.36
-/// (tauri-apps/tao#1218), but no released Tauri pulls that in yet, so clear the
-/// flag ourselves. That is the whole fix: an event box that isn't above its
-/// child still receives everything the header bar doesn't want, so dragging the
-/// bar to move the window keeps working.
-///
-/// Delete this function, its call in `create_main_window`, and the `gtk` dependency once
-/// `tauri-runtime-wry` requires tao 0.36 or later. As of 2.11.4 it still asks
-/// for `^0.35.0`, which excludes the fix.
-///
-/// X11 sessions are unaffected - tao only installs this titlebar on Wayland, so
-/// there is nothing to find and this is a no-op.
-#[cfg(target_os = "linux")]
-fn fix_wayland_titlebar(window: &tauri::WebviewWindow) {
-    use gtk::prelude::*;
-
-    let gtk_window = match window.gtk_window() {
-        Ok(w) => w,
-        Err(e) => {
-            warn!("fix_wayland_titlebar: no GTK window behind the Tauri one: {e}");
-            return;
-        }
-    };
-
-    let Some(titlebar) = gtk_window.titlebar() else {
-        trace!("fix_wayland_titlebar: no client-side titlebar, nothing to do");
-        return;
-    };
-
-    match titlebar.downcast::<gtk::EventBox>() {
-        Ok(event_box) => {
-            event_box.set_above_child(false);
-            debug!("fix_wayland_titlebar: titlebar buttons are reachable again");
-        }
-        // A future tao that stops wrapping the header bar lands here, and the
-        // buttons work on their own.
-        Err(_) => trace!("fix_wayland_titlebar: titlebar isn't tao's event box, leaving it alone"),
-    }
-}
-
 /// Records where a finished inbound transfer's files landed, before the front
 /// end hears that it finished and can ask to open them.
 fn remember_received(info: &ChannelMessage, state: &AppState) {
@@ -571,18 +520,7 @@ fn create_main_window(app_handle: &AppHandle) -> Option<tauri::WebviewWindow> {
         .find(|w| w.label == "main")?
         .clone();
     match tauri::WebviewWindowBuilder::from_config(app_handle, &config).and_then(|b| b.build()) {
-        Ok(w) => {
-            // GTK objects may only be touched on the main thread, and this
-            // runs off it (see `spawn_main_window`).
-            #[cfg(target_os = "linux")]
-            {
-                let gw = w.clone();
-                if let Err(e) = w.run_on_main_thread(move || fix_wayland_titlebar(&gw)) {
-                    warn!("create_main_window: titlebar fix: {e}");
-                }
-            }
-            Some(w)
-        }
+        Ok(w) => Some(w),
         Err(e) => {
             error!("create_main_window: {e}");
             None
