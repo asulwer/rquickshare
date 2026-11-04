@@ -38,6 +38,42 @@ To root-cause, capture phone logcat spanning the end of one transfer and the
 start of the next, and check the `NearbySharing` role / advertising state
 between them.
 
+## C. The phone drops WiFi while its Quick Share send sheet is open
+
+This is why the BLE receiver exists; see
+[ble-receiver-discovery.md](docs/ble-receiver-discovery.md). On Pixels with
+AirDrop compatibility, opening the send sheet starts
+`com.google.android.mosey`, which runs its own 5 GHz link. If the phone's WiFi
+is also on 5 GHz, Mosey disconnects it until the sheet closes:
+
+```
+Mosey.A: Disconnect Wi-Fi because STA and mosey are running on the same band
+```
+
+It is a band check, not a channel check, so a phone on a 2.4 GHz or 6 GHz
+network keeps its WiFi and finds us over mDNS as usual.
+
+## D. Linux: phones ask to pair and can't find us over Bluetooth
+
+With `Experimental = true` in `/etc/bluetooth/main.conf` (or bluetoothd started
+with `-E`), BlueZ loads its LE Audio media control client, `mcp`. When a phone
+connects to read our receiver advertisement, `mcp` reads the phone's Media
+Player Name, gets Insufficient Authentication, and BlueZ asks the phone to
+pair. The phone declines and drops the link before reading the advertisement,
+then retries while the send sheet is open. With its WiFi dropped (C), it never
+lists us. The side menu shows a note when experimental mode is on.
+
+[ble-nearby-alert.md](docs/ble-nearby-alert.md#ways-to-stop-the-pairing-request)
+has the details. Fixes, in order:
+
+- Start bluetoothd with `-P mcp`, with a systemd drop-in. You lose media
+  control of the phone over LE Audio.
+- Or pair the phone with this computer once, from the phone's Bluetooth
+  settings with the send sheet closed. That only fixes that phone.
+- Or set `Client = false` under `[GATT]`. That stops BlueZ reading the
+  services of any device that connects to it, which breaks BLE mice and
+  keyboards.
+
 ## Capturing phone logcat
 
 ```powershell

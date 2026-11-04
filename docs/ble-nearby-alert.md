@@ -106,10 +106,10 @@ advertisement (see [ble-receiver-discovery.md](ble-receiver-discovery.md)):
 
 1. The phone connects, with the laptop as the peripheral.
 2. bluetoothd reads the phone's GATT services. `mcp` attaches to the phone's
-   Generic Media Control service and reads it.
+   Generic Media Control service and reads its Media Player Name (0x2b93).
 3. The phone answers Insufficient Authentication.
 4. BlueZ raises the link security and sends an SMP Security Request (bonding,
-   MITM, SC).
+   no MITM, SC).
 5. The phone shows a pairing request.
 
 `mcp` doesn't check who started the connection or whether the device is bonded,
@@ -119,7 +119,14 @@ and BlueZ's automatic security elevation has no off switch in 5.85. Commits to
 So we don't ask anyone to turn experimental mode on. Systems that already run
 it, for LE Audio for example, get the passive monitor automatically and already
 see the pairing request when a phone connects to the receiver advertisement.
-Declining the request is harmless.
+
+Declining the request isn't harmless. The phone drops the link before it reads
+the receiver advertisement and retries for as long as its send sheet is open,
+asking again each time. A phone whose WiFi is off, as when the send sheet drops
+it (KNOWN_ISSUES.md, C), then never finds us. A `btmon` capture on BlueZ 5.85
+with a Pixel 11 Pro showed this on every retry, and `-P mcp` stopped it: the
+phone listed us without a prompt. The app shows a note in the side menu when
+experimental mode is on.
 
 ## Ways to stop the pairing request
 
@@ -129,6 +136,7 @@ rquickshare can do over D-Bus.
 | Option | Verified | What you lose |
 | --- | --- | --- |
 | Start bluetoothd with `-P mcp` (systemd drop-in) | Tested, the request stopped | Showing or controlling the phone's media over LE Audio |
+| Pair the phone once, from its Bluetooth settings | Tested, the request stopped | Nothing, but it only fixes that phone |
 | `ReverseServiceDiscovery = false` in `[General]` | Source only (`src/device.c:6149`) | bluetoothd stops reading the services of any device that connects to the laptop on its own. Connections the laptop starts are unaffected. |
 | `Client = false` in `[GATT]` | Source only (`src/device.c:6154`) | Same as `ReverseServiceDiscovery = false` for LE |
 | `[GATT] Security` | Only on BlueZ master, needs `Testing = true` | Turns off automatic security on every link. Not worth it. |

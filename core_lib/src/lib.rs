@@ -83,6 +83,8 @@ mod manager;
 mod qr;
 mod utils;
 
+#[cfg(all(feature = "experimental", target_os = "linux"))]
+pub use hdl::bluez_experimental;
 pub use hdl::{EndpointInfo, OutboundPayload, State, TextPayloadType, Visibility};
 pub use manager::SendInfo;
 pub use utils::{device_name, truncate_device_name, DeviceType, MAX_DEVICE_NAME_LEN};

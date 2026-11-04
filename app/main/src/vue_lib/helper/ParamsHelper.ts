@@ -35,6 +35,10 @@ export interface TauriVM {
     deviceNameOverride: string | undefined;
     hostnameDefault: string | undefined;
     settingsOpen: boolean;
+    // Whether bluetoothd runs with experimental features (Linux), and
+    // whether the user has dismissed the side menu's note about it.
+    bluezExperimental: boolean;
+    experimentalNoteDismissed: boolean;
     new_version: string | null;
     enable: () => Promise<void>;
     disable: () => Promise<void>;
