@@ -4085,7 +4085,6 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "fern",
- "gtk",
  "hostname",
  "humantime",
  "libc",
