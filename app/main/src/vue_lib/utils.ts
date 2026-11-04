@@ -162,12 +162,16 @@ async function clearSending(vm: TauriVM, ) {
 	vm.qrAutoSent = false;
 }
 
-function removeRequest(vm: TauriVM, id: string) {
+async function removeRequest(vm: TauriVM, id: string) {
 	const idx = vm.requests.findIndex((el) => el.id === id);
 
 	if (idx !== -1) {
 		vm.requests.splice(idx, 1);
 	}
+
+	// The backend keeps transfers for a window created later; forget this one
+	// there too, or reopening the window brings the card back.
+	await vm.invoke('forget_transfer', { id });
 }
 
 // Throws rather than returning quietly: both of these are reachable by clicking

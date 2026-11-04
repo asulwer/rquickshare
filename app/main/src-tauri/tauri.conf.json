@@ -47,7 +47,9 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "RQuickShare",
+        "create": false,
         "width": 900,
         "height": 600,
         "resizable": true,

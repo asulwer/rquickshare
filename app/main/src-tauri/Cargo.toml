@@ -19,6 +19,7 @@ humantime = "2.4"
 log = "0.4.34"
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 rqs_lib = { path = "../../../core_lib", features = ["experimental"] }
+serde = { version = "1.0.229", features = ["derive"] }
 # No "devtools": debug builds always have the inspector, and release builds
 # shouldn't ship it.
 tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
@@ -37,6 +38,7 @@ tauri-plugin-opener = "2.7"
 # `fix_wayland_titlebar`. Same version tauri itself already pulls in.
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
+libc = "0.2"
 # Linux notifications with Accept/Reject buttons; elsewhere the Tauri
 # notification plugin is used.
 notify-rust = "4.18"
