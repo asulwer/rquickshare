@@ -9,7 +9,11 @@ const props = defineProps({
 	}
 });
 
-const emits = defineEmits(['invertVisibility', 'clearSending']);
+const emits = defineEmits(['invertVisibility', 'clearSending', 'dismissExperimentalNote', 'openUrl']);
+
+// KNOWN_ISSUES.md, D: why experimental mode makes phones ask to pair, and
+// how to stop it.
+const experimentalHelpUrl = 'https://github.com/asulwer/rquickshare/blob/master/KNOWN_ISSUES.md#d-linux-phones-ask-to-pair-and-cant-find-us-over-bluetooth';
 
 const pluralize = (n: number, s: string) => n === 1 ? s : `${s}s`;
 </script>
@@ -49,6 +53,34 @@ const pluralize = (n: number, s: string) => n === 1 ? s : `${s}s`;
 				You are temporarily visible to everyone.
 			</span>
 		</p>
+		<!-- Linux only: with experimental mode on, BlueZ asks a phone reading
+		     our Bluetooth advertisement to pair, the phone drops the link, and
+		     without WiFi it can't find us (KNOWN_ISSUES.md, D). -->
+		<div
+			v-if="props.vm.bluezExperimental && !props.vm.experimentalNoteDismissed" role="status"
+			class="text-xs mx-3 mb-3 p-3 rounded-xl bg-amber-100 dark:bg-amber-900/40">
+			<p class="font-medium mb-1">
+				Phones may ask to pair
+			</p>
+			<p>
+				Bluetooth's experimental mode is on, so phones with WiFi off can ask to pair and fail to find
+				this computer.
+			</p>
+			<div class="flex flex-row justify-end gap-2 mt-2">
+				<p
+					tabindex="0" role="button"
+					class="btn w-fit px-3 py-1 rounded-xl active:scale-95 transition duration-150 ease-in-out shadow-none"
+					@click="emits('openUrl', experimentalHelpUrl)" @keydown.enter="emits('openUrl', experimentalHelpUrl)">
+					Learn more
+				</p>
+				<p
+					tabindex="0" role="button"
+					class="btn w-fit px-3 py-1 rounded-xl active:scale-95 transition duration-150 ease-in-out shadow-none"
+					@click="emits('dismissExperimentalNote')" @keydown.enter="emits('dismissExperimentalNote')">
+					Got it
+				</p>
+			</div>
+		</div>
 	</div>
 	<div class="w-72 p-6 flex flex-col justify-between" v-else>
 		<div>

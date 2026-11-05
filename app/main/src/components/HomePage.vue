@@ -6,7 +6,9 @@
 		<Heading :vm="vm" :open-url="openUrl" @open-settings="settingsOpen = true" />
 
 		<div class="flex-1 flex flex-row">
-			<SideMenu :vm="vm" @invert-visibility="invertVisibility(vm)" @clear-sending="stopSending()" />
+			<SideMenu
+				:vm="vm" @invert-visibility="invertVisibility(vm)" @clear-sending="stopSending()"
+				@dismiss-experimental-note="dismissExperimentalNote()" @open-url="openUrl" />
 
 			<div class="flex-1 flex flex-col bg-white dark:bg-neutral-800 w-full max-w-full min-w-0 min-h-full rounded-tl-[3rem] p-12 h-1 overflow-y-scroll">
 				<ContentStatus :vm="vm" @outbound-payload="(el: OutboundPayload) => outboundPayload = el" @discovery-running="startDiscovery" />
@@ -214,7 +216,7 @@ import { EndpointInfo } from '@martichou/core_lib/bindings/EndpointInfo';
 import { OutboundPayload } from '@martichou/core_lib/bindings/OutboundPayload';
 import { Visibility } from '@martichou/core_lib/bindings/Visibility';
 
-import { ToastNotification, stateToDisplay, autostartKey, DisplayedItem, useToastStore, opt, ToastType, utils } from '../vue_lib';
+import { ToastNotification, stateToDisplay, autostartKey, experimentalNoteDismissedKey, DisplayedItem, useToastStore, opt, ToastType, utils } from '../vue_lib';
 import { addMissingTransfers, PageState } from '../vue_lib/transfers';
 
 import SettingsModal from '../composables/SettingsModal.vue';
@@ -301,6 +303,9 @@ export default {
 			hostnameDefault: ref<string | undefined>(undefined),
 
 			settingsOpen: ref<boolean>(false),
+
+			bluezExperimental: ref<boolean>(false),
+			experimentalNoteDismissed: ref<boolean>(false),
 
 			new_version: opt<string>(),
 		};
@@ -406,6 +411,20 @@ export default {
 					}
 				})
 			);
+
+			this.unlisten.push(
+				await listen<boolean>('bluez_experimental', (event) => {
+					this.bluezExperimental = event.payload;
+				})
+			);
+			// Set before we were listening, most likely. Caught so a failure
+			// here can't skip the rest of the setup.
+			try {
+				this.experimentalNoteDismissed = await this.store.get<boolean>(experimentalNoteDismissedKey) ?? false;
+				this.bluezExperimental = await invoke<boolean>('get_bluez_experimental');
+			} catch (e) {
+				console.error('[rqs] reading BlueZ experimental mode failed:', e);
+			}
 
 			this.unlisten.push(
 				await listen('visibility_updated', async () => {
@@ -643,6 +662,15 @@ export default {
 				this.responding.delete(id);
 				this.toastStore.addToast("Could not answer the transfer", ToastType.Error);
 				console.error("Error responding to transfer", e);
+			}
+		},
+		dismissExperimentalNote: async function() {
+			this.experimentalNoteDismissed = true;
+			try {
+				await this.store.set(experimentalNoteDismissedKey, true);
+				await this.store.save();
+			} catch (e) {
+				console.error('[rqs] saving the dismissed note failed:', e);
 			}
 		},
 		// Web links only. `destination` is a filesystem path and must not come

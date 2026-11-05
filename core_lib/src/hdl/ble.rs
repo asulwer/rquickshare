@@ -182,6 +182,7 @@ impl BleListener {
             Ok(manager) => manager,
             Err(e) => {
                 info!("{INNER_NAME}: no advertisement monitor ({e}), falling back to scanning");
+                BLUEZ_EXPERIMENTAL.send_replace(false);
                 return Ok(false);
             }
         };
@@ -210,6 +211,7 @@ impl BleListener {
             }
         };
         info!("{INNER_NAME}: listening with a passive advertisement monitor");
+        BLUEZ_EXPERIMENTAL.send_replace(true);
 
         // BlueZ keeps the monitor across a power cycle, but doesn't report
         // the addresses it was tracking as lost. Nor does it when it removed
@@ -581,6 +583,23 @@ fn carries_sharing(service_data: &std::collections::HashMap<Uuid, Vec<u8>>) -> b
     service_data
         .get(&SERVICE_UUID_SHARING)
         .is_some_and(|data| data.starts_with(&SHARING_PREFIX))
+}
+
+/// Whether bluetoothd runs with experimental features, which is the only way
+/// it lets us register an advertisement monitor. That same switch loads
+/// BlueZ's LE Audio media control client, `mcp`, which asks a phone reading
+/// our receiver advertisement to pair (docs/ble-nearby-alert.md). The phone
+/// declines and drops the link, so it can't find us without WiFi. A `watch`
+/// so the app can wait on it; it is only known once the nearby alert has
+/// tried the monitor.
+#[cfg(target_os = "linux")]
+static BLUEZ_EXPERIMENTAL: std::sync::LazyLock<watch::Sender<bool>> =
+    std::sync::LazyLock::new(|| watch::channel(false).0);
+
+/// Follows whether bluetoothd runs with experimental features.
+#[cfg(target_os = "linux")]
+pub fn bluez_experimental() -> watch::Receiver<bool> {
+    BLUEZ_EXPERIMENTAL.subscribe()
 }
 
 /// Resolves when Bluetooth comes on: the default adapter is powered on, or an

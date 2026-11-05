@@ -38,6 +38,7 @@ export const autostartKey = "autostart";
 export const realcloseKey = "realclose";
 export const startminimizedKey = "startminimized";
 export const nearbyAlertsKey = "nearby_alerts";
+export const experimentalNoteDismissedKey = "bluez_experimental_note_dismissed";
 export const clipboardAutosyncKey = "clipboard_autosync";
 export const visibilityKey = "visibility";
 export const downloadPathKey = "download_path";

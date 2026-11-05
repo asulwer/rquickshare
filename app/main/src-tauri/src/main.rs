@@ -87,6 +87,7 @@ async fn main() -> Result<(), anyhow::Error> {
         // shell plugin's `open`, which rejects filesystem paths.
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            cmds::get_bluez_experimental,
             cmds::change_download_path,
             cmds::change_logging_level,
             cmds::change_nearby_alerts,
@@ -316,6 +317,25 @@ fn spawn_receiver_tasks(app_handle: &AppHandle) {
             }
         }
     });
+
+    // Tells the window whether bluetoothd runs with experimental features,
+    // whose LE Audio client makes phones fail to find us over Bluetooth.
+    #[cfg(target_os = "linux")]
+    {
+        let capp_handle = app_handle.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut experimental = rqs_lib::bluez_experimental();
+            loop {
+                let on = *experimental.borrow_and_update();
+                if let Err(e) = capp_handle.emit("bluez_experimental", on) {
+                    error!("Couldn't tell the window about BlueZ's experimental mode: {e}");
+                }
+                if experimental.changed().await.is_err() {
+                    return;
+                }
+            }
+        });
+    }
 
     let capp_handle = app_handle.clone();
     tauri::async_runtime::spawn(async move {
