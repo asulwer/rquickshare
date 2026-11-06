@@ -1,7 +1,7 @@
 name: Release
 
 # Builds the installers and publishes a release. Start it from the Actions tab:
-# Release > Run workflow.
+# Release > Run workflow. Untick an OS there to release without its installer.
 #
 # The version is <major>.<YY>.<DDD>.<build>, e.g. 1.26.298.42:
 #   major  The [workspace.package] version's first number in Cargo.toml.
@@ -24,6 +24,20 @@ on:
           Off: build only, and keep the installers as workflow artifacts.
         type: boolean
         default: true
+      # One box per OS, so a release can go out without one whose runners
+      # won't come (macos-latest has sat queued until GitHub gave up on it).
+      linux:
+        description: Build the Linux installers (.deb, .rpm).
+        type: boolean
+        default: true
+      windows:
+        description: Build the Windows installer (-setup.exe).
+        type: boolean
+        default: true
+      macos:
+        description: Build the macOS installer (.dmg, Apple Silicon).
+        type: boolean
+        default: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,7 +48,44 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       cargo_version: ${{ steps.version.outputs.cargo_version }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
+      - id: matrix
+        name: Pick the OSes to build
+        env:
+          LINUX: ${{ inputs.linux }}
+          WINDOWS: ${{ inputs.windows }}
+          MACOS: ${{ inputs.macos }}
+        run: |
+          entries=()
+          if [ "$LINUX" = "true" ]; then
+            # No AppImage. It bundles all of WebKitGTK and GTK and compresses
+            # them, which made the Linux release take ~40 minutes against a
+            # few for macOS and Windows. Add AppImage back here to ship it
+            # again; rename_build.sh still handles it.
+            entries+=('{"os":"ubuntu-24.04","bundles":"deb,rpm"}')
+          fi
+          if [ "$MACOS" = "true" ]; then
+            # Apple Silicon. macos-13 (the Intel image) was retired: its jobs
+            # sat queued for 24h and were cancelled, never running. No
+            # `bundles`, so Tauri builds every macOS format.
+            entries+=('{"os":"macos-latest"}')
+          fi
+          if [ "$WINDOWS" = "true" ]; then
+            # Only the -setup.exe (NSIS). The .msi installed the same app; the
+            # .exe is smaller and, with installMode "both" in tauri.conf.json,
+            # offers the same Program Files install for all users.
+            entries+=('{"os":"windows-latest","bundles":"nsis"}')
+          fi
+          if [ ${#entries[@]} -eq 0 ]; then
+            echo "::error::no OS selected; tick at least one of Linux, Windows and macOS"
+            exit 1
+          fi
+          matrix="{\"include\":[$(IFS=,; echo "${entries[*]}")]}"
+          echo "matrix ${matrix}"
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+
+
       - uses: actions/checkout@v5
       - id: version
         name: Work out the version
@@ -87,22 +138,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-24.04
-            # No AppImage. It bundles all of WebKitGTK and GTK and compresses
-            # them, which made the Linux release take ~40 minutes against a few
-            # for macOS and Windows. Add AppImage back here to ship it again;
-            # rename_build.sh still handles it.
-            bundles: deb,rpm
-          # Apple Silicon. macos-13 (the Intel image) was retired: its jobs sat
-          # queued for 24h and were cancelled, never running.
-          - os: macos-latest
-          # Only the -setup.exe (NSIS). The .msi installed the same app; the
-          # .exe is smaller and, with installMode "both" in tauri.conf.json,
-          # offers the same Program Files install for all users.
-          - os: windows-latest
-            bundles: nsis
+      # The OSes ticked in Run workflow; see the version job.
+      matrix: ${{ fromJSON(needs.version.outputs.matrix) }}
     env:
       TARGET_PATH: app/main
       # The repo is a Cargo workspace, so build output lands in the root
@@ -162,8 +199,8 @@ jobs:
           path: ${{ env.BUNDLE_DIR }}/*/r-quick-share-${{ env.BUNDLE_NAME }}*
           if-no-files-found: error
 
-  # Runs only once every OS has built, so a release never goes out with some of
-  # its installers missing.
+  # Runs only once every ticked OS has built, so a release never goes out
+  # missing an installer it was meant to have.
   publish:
     needs: [version, build]
     if: inputs.publish
