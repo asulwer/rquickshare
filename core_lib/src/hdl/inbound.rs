@@ -138,6 +138,20 @@ pub struct InboundRequest<S> {
         any(target_os = "linux", target_os = "windows")
     ))]
     upgrade_listener_started: bool,
+    /// The upgrade path last offered, so a repeated request doesn't send the
+    /// same one twice. See `offer_upgrade_paths`.
+    #[cfg(all(
+        feature = "experimental",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    upgrade_offered: Option<UpgradeOffer>,
+    /// The phone answered our WIFI_LAN offer with UPGRADE_FAILURE: it isn't
+    /// on our network, so the hotspot is next.
+    #[cfg(all(
+        feature = "experimental",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    lan_upgrade_failed: bool,
     /// The endpoint id the peer gave in its ConnectionRequest. Whoever connects
     /// to the upgrade listener has to introduce itself with this id.
     #[cfg(all(
@@ -215,6 +229,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
                 any(target_os = "linux", target_os = "windows")
             ))]
             upgrade_listener_started: false,
+            #[cfg(all(
+                feature = "experimental",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            upgrade_offered: None,
+            #[cfg(all(
+                feature = "experimental",
+                any(target_os = "linux", target_os = "windows")
+            ))]
+            lan_upgrade_failed: false,
             #[cfg(all(
                 feature = "experimental",
                 any(target_os = "linux", target_os = "windows")
@@ -963,35 +987,68 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
         Ok(())
     }
 
-    /// Offer the phone every upgrade path we can serve, and let it pick.
+    /// Offer the phone one upgrade path: WIFI_LAN while we have a LAN address
+    /// and the phone hasn't turned it down, WIFI_HOTSPOT after that.
     ///
-    /// The phone's request carries no medium (the proto has the field only on
-    /// the host's offer), and its WiFi state is not knowable at this point, so
-    /// rather than guess we present both: WIFI_LAN when we have a LAN address,
-    /// and WIFI_HOTSPOT. A single listener on 0.0.0.0:8899 accepts the phone on
-    /// whichever interface it reaches us - the LAN one if it is on our network,
-    /// the AP one if it is not. Whichever it connects on wins; the other offer
-    /// is simply never taken up.
+    /// The phone drops its WiFi while its send sheet is open and rejoins its
+    /// network once a transfer starts, so its ConnectionRequest can't tell us
+    /// which path it will be able to use. Its answer to an offer can: it
+    /// connects, or it sends UPGRADE_FAILURE naming the medium. So we offer
+    /// WIFI_LAN and move to the hotspot only on that failure.
+    ///
+    /// Never both at once. A phone that has just upgraded over WIFI_LAN and
+    /// then gets a hotspot offer drops the LAN socket before sending anything
+    /// (google/nearby won't take a hotspot while WIFI_LAN is up), and by then
+    /// it has released the BLE channel, so the transfer dies as "unexpected
+    /// disconnection". Measured: every phone-to-PC send with the phone back
+    /// on the home network failed this way.
     #[cfg(all(
         feature = "experimental",
         any(target_os = "linux", target_os = "windows")
     ))]
     async fn offer_upgrade_paths(&mut self) {
         let have_lan = Self::lan_ipv4().is_some();
+        let Some(offer) =
+            next_upgrade_offer(have_lan, self.lan_upgrade_failed, self.upgrade_offered)
+        else {
+            debug!(
+                "Bandwidth upgrade: {:?} already offered",
+                self.upgrade_offered
+            );
+            return;
+        };
+        self.upgrade_offered = Some(offer);
 
-        // WIFI_LAN first: it needs no soft-AP, does not disturb the phone's own
-        // network, and is the faster path when the phone is on our LAN.
-        if have_lan {
-            if let Err(e) = self.offer_wifi_lan_upgrade().await {
-                warn!("offer_wifi_lan_upgrade failed: {e}");
-            }
+        let sent = match offer {
+            UpgradeOffer::WifiLan => self.offer_wifi_lan_upgrade().await,
+            UpgradeOffer::WifiHotspot => self.offer_wifi_hotspot_upgrade().await,
+        };
+        if let Err(e) = sent {
+            warn!("Bandwidth upgrade: offering {offer:?} failed: {e}");
         }
+    }
 
-        // WIFI_HOTSPOT as well, for a phone that genuinely has no network. When
-        // we already have a LAN path this is the fallback the phone falls to
-        // only if it cannot reach us on the LAN.
-        if let Err(e) = self.offer_wifi_hotspot_upgrade().await {
-            warn!("offer_wifi_hotspot_upgrade failed: {e}");
+    /// The phone turned down an upgrade path we offered. A WIFI_LAN failure
+    /// means it isn't on our network, so offer the hotspot; after a hotspot
+    /// failure there is nothing left and the transfer stays on the prior
+    /// channel.
+    #[cfg(all(
+        feature = "experimental",
+        any(target_os = "linux", target_os = "windows")
+    ))]
+    async fn upgrade_failed(&mut self, medium: Option<UpgradeOffer>) {
+        match medium {
+            Some(UpgradeOffer::WifiLan) => {
+                info!("Bandwidth upgrade: the phone can't reach us on the LAN; trying the hotspot");
+                self.lan_upgrade_failed = true;
+                if self.can_upgrade() && self.state.state == State::ReceivingFiles {
+                    self.offer_upgrade_paths().await;
+                }
+            }
+            Some(UpgradeOffer::WifiHotspot) => {
+                warn!("Bandwidth upgrade: the phone turned down the hotspot; staying on the prior channel")
+            }
+            None => debug!("Bandwidth upgrade: failure for a medium we didn't offer"),
         }
     }
 
@@ -1709,6 +1766,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
                     }
                 }
 
+                // The phone couldn't use the path we offered; it names which.
+                #[cfg(all(
+                    feature = "experimental",
+                    any(target_os = "linux", target_os = "windows")
+                ))]
+                if let Some(bun) = v1_frame.bandwidth_upgrade_negotiation.as_ref().filter(|bun| {
+                    bun.event_type()
+                        == location_nearby_connections::bandwidth_upgrade_negotiation_frame::EventType::UpgradeFailure
+                }) {
+                    use location_nearby_connections::bandwidth_upgrade_negotiation_frame::upgrade_path_info::Medium;
+                    let medium = match bun.upgrade_path_info.as_ref().map(|info| info.medium()) {
+                        Some(Medium::WifiLan) => Some(UpgradeOffer::WifiLan),
+                        Some(Medium::WifiHotspot) => Some(UpgradeOffer::WifiHotspot),
+                        _ => None,
+                    };
+                    self.upgrade_failed(medium).await;
+                }
+
                 // Upgrading starts the Mobile Hotspot and hands its password
                 // to the peer, so only for a transfer the user accepted, and
                 // only when the transport can adopt the new socket. Accepting
@@ -1729,9 +1804,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
                             warn!("offer_wifi_direct_upgrade (on request) failed: {}", e);
                         }
                     } else {
-                        info!(
-                            "Phone requested an upgrade path; offering WIFI_LAN and WIFI_HOTSPOT"
-                        );
+                        info!("Phone requested an upgrade path");
                         self.offer_upgrade_paths().await;
                     }
                 }
@@ -2180,9 +2253,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
                 warn!("offer_wifi_direct_upgrade failed: {}", e);
             }
         } else {
-            // Offer both paths and let the phone connect on whichever it can
-            // reach. Deciding here from the ConnectionRequest was unreliable:
-            // it reflects the phone's WiFi state at one instant, and the Quick
+            // WIFI_LAN first, the hotspot only if the phone turns that down.
+            // Deciding here from the ConnectionRequest was unreliable: it
+            // reflects the phone's WiFi state at one instant, and the Quick
             // Share extension drops WiFi to send then reconnects, so a phone
             // that reported no LAN is often back on it moments later, unable to
             // join our AP. Offering only the AP stranded exactly those
@@ -2537,6 +2610,37 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send + 'static> InboundRequest<S> {
     }
 }
 
+/// An upgrade path we offer a phone that reached us over BLE.
+#[cfg(all(
+    feature = "experimental",
+    any(target_os = "linux", target_os = "windows")
+))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpgradeOffer {
+    WifiLan,
+    WifiHotspot,
+}
+
+/// The one upgrade path to offer next, or `None` when it is already out.
+/// WIFI_LAN while we have a LAN address and the phone hasn't failed it, then
+/// the hotspot. See `InboundRequest::offer_upgrade_paths` for why only one.
+#[cfg(all(
+    feature = "experimental",
+    any(target_os = "linux", target_os = "windows")
+))]
+fn next_upgrade_offer(
+    have_lan: bool,
+    lan_failed: bool,
+    offered: Option<UpgradeOffer>,
+) -> Option<UpgradeOffer> {
+    let next = if have_lan && !lan_failed {
+        UpgradeOffer::WifiLan
+    } else {
+        UpgradeOffer::WifiHotspot
+    };
+    (offered != Some(next)).then_some(next)
+}
+
 /// Accept connections on the upgrade listener until one introduces itself as
 /// `expected_endpoint_id`, hand that socket to `upgrade_tx`, and stop.
 ///
@@ -2700,6 +2804,43 @@ pub(crate) async fn introduce_upgraded_channel(
 ))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upgrade_offers_lan_first() {
+        assert_eq!(
+            next_upgrade_offer(true, false, None),
+            Some(UpgradeOffer::WifiLan)
+        );
+    }
+
+    #[test]
+    fn upgrade_offers_the_hotspot_only_after_lan_fails() {
+        // Asked again while the LAN offer is out: nothing new to send.
+        assert_eq!(
+            next_upgrade_offer(true, false, Some(UpgradeOffer::WifiLan)),
+            None
+        );
+        assert_eq!(
+            next_upgrade_offer(true, true, Some(UpgradeOffer::WifiLan)),
+            Some(UpgradeOffer::WifiHotspot)
+        );
+        assert_eq!(
+            next_upgrade_offer(true, true, Some(UpgradeOffer::WifiHotspot)),
+            None
+        );
+    }
+
+    #[test]
+    fn upgrade_offers_the_hotspot_without_a_lan_address() {
+        assert_eq!(
+            next_upgrade_offer(false, false, None),
+            Some(UpgradeOffer::WifiHotspot)
+        );
+        assert_eq!(
+            next_upgrade_offer(false, false, Some(UpgradeOffer::WifiHotspot)),
+            None
+        );
+    }
 
     #[test]
     fn test_lan_ipv4_resolves_valid_address() {
