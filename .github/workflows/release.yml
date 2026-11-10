@@ -86,7 +86,7 @@ jobs:
           echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
 
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - id: version
         name: Work out the version
         env:
@@ -149,11 +149,11 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
       CARGO_VERSION: ${{ needs.version.outputs.cargo_version }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v5
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: app/main/package.json
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -193,7 +193,7 @@ jobs:
           ./rename_build.sh "${BUNDLE_DIR}" "${BUNDLE_NAME}"
 
       - name: Upload installers
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: rquickshare-${{ env.VERSION }}-${{ matrix.os }}
           path: ${{ env.BUNDLE_DIR }}/*/r-quick-share-${{ env.BUNDLE_NAME }}*
@@ -213,7 +213,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           path: installers
           pattern: rquickshare-${{ needs.version.outputs.version }}-*

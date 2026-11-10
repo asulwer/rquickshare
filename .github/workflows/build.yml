@@ -42,11 +42,11 @@ jobs:
       BUNDLE_DIR: target/debug/bundle
       BUNDLE_NAME: main
     steps:
-      - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v5
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: app/main/package.json
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -82,7 +82,7 @@ jobs:
           ./rename_build.sh "${BUNDLE_DIR}" "${BUNDLE_NAME}" debug
 
       - name: Upload result
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: artifact-debug-rquickshare-${{ matrix.os }}
           # Debug bundles are large and only useful while the PR is open.

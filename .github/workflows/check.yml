@@ -20,7 +20,7 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -36,7 +36,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, windows-latest]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -55,7 +55,7 @@ jobs:
     name: cargo test
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # protoc for prost-build. A composite action (no Node runtime):
@@ -93,14 +93,14 @@ jobs:
       run:
         working-directory: app/main
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # No `version:` - action-setup reads packageManager from the app's
       # package.json, so CI and local stay on the same pnpm. The root
       # package.json only holds the bump script, hence the explicit path.
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: app/main/package.json
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
