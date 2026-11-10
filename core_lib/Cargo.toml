@@ -61,7 +61,7 @@ hmac = "0.13"
 hostname = "0.4.2"
 if-addrs = "0.15"
 cbc = { version = "0.2", features = ["alloc"] }
-log = "0.4.34"
+log = "0.4.35"
 # The published upstream crate, not Martichou's `unsolicited` fork. That fork
 # exists to expose `register_resend` (a forced re-announcement), but it is
 # pinned to a *branch* of a 0.10.4 snapshot from Feb 2024 whose maintainer is

@@ -16,7 +16,7 @@ anyhow = "1.0.104"
 fern = { version = "0.7", features = ["colored"] }
 hostname = "0.4.2"
 humantime = "2.4"
-log = "0.4.34"
+log = "0.4.35"
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 rqs_lib = { path = "../../../core_lib", features = ["experimental"] }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -24,7 +24,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 # shouldn't ship it.
 tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
 tauri-plugin-autostart = "2.7"
-tauri-plugin-notification = "2.7"
+tauri-plugin-notification = "2.8"
 tauri-plugin-single-instance = "2.5"
 tauri-plugin-store = "2.5"
 tauri-plugin-dialog = "2.8"
