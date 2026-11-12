@@ -188,6 +188,14 @@ async fn main() -> Result<(), anyhow::Error> {
                     kill_app(app_handle);
                 }
             }
+            // Files from the Share extension, "Open With" or a drop on the
+            // Dock icon. macOS sends these as an event, not as arguments.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Opened { urls } => {
+                let args: Vec<String> = urls.iter().map(|url| url.to_string()).collect();
+                cmds::add_launch_files(app_handle, &args, Path::new("/"));
+                open_main_window(app_handle);
+            }
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => {
                 trace!("RunEvent::Reopen");

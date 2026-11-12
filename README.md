@@ -43,6 +43,8 @@ Open `r-quick-share-main_v<version>_aarch64.dmg` and drag the app to Application
 
 Because the app isn't signed, macOS will block it the first time. Go to `System Settings > Privacy & Security`, scroll down to the message about rquickshare, and click **Open Anyway**.
 
+Right-click a file in Finder and choose `Share > RQuickShare` to queue it for transfer. The app opens with the files ready and you only need to pick a target device. This uses a Share extension that is embedded in the macOS app bundle. If the item does not appear in the Share menu, open the app once from Applications, then enable it under `Settings > General > Login Items & Extensions > Sharing` if needed. See [app/main/share-extension/README.md](app/main/share-extension/README.md) for build and troubleshooting details.
+
 #### Linux
 
 The packages are built on Ubuntu 24.04, and the minimum GLIBC version they need is part of the file name (for example `glibc-2.39`). Check yours with `ldd --version`.
