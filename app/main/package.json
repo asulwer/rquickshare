@@ -15,6 +15,7 @@
 		"preview": "vite preview",
 		"check": "cd src-tauri && cargo check",
 		"lint": "eslint .",
+		"build:share-extension": "bash share-extension/build.sh",
 		"bump": "node ../../scripts/bump.mjs"
 	},
 	"dependencies": {
